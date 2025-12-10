@@ -26,25 +26,27 @@
 pip install -r requirements.txt
 ```
 
-### 2. 配置机器人
+### 2. 配置机器人（外部配置文件）
 
-编辑 `main.py` 文件，修改以下配置：
+1. 复制示例配置：
+   ```bash
+   cp config.example.json config.json
+   ```
+2. 编辑 `config.json`，填入你的实际值：
+   - `token`: Discord Bot Token
+   - `guild_id`: 服务器 ID
+   - `yipay_url`: 易支付域名（以 `/` 结尾）
+   - `yipay_pid` / `yipay_key`: 商户 ID 与密钥
+   - `payment_types`: 支付通道映射，例如：
+     ```json
+     {
+       "USDT-TRC20": "usdt_trc20",
+       "USDT-BEP20": "usdt_bep20"
+     }
+     ```
+   - 可选项：`notify_url`、`return_url`、`database`（数据库文件名）
 
-```python
-TOKEN = '你的_DISCORD_BOT_TOKEN'
-GUILD_ID = 123456789012345678  # 你的服务器ID
-
-# 彩虹易支付配置
-YIPAY_URL = "https://你的易支付域名.com/"
-YIPAY_PID = 1000  # 商户ID
-YIPAY_KEY = "你的商户KEY"
-
-# 支付通道类型（根据你的易支付后台配置修改）
-PAYMENT_TYPES = {
-    "USDT-TRC20": "usdt_trc20",
-    "USDT-BEP20": "usdt_bep20"
-}
-```
+> 如需使用自定义路径，设置环境变量 `BOT_CONFIG_PATH=/path/to/your_config.json`。
 
 ### 3. 设置机器人权限
 
@@ -174,4 +176,5 @@ https://discord.com/api/oauth2/authorize?client_id=YOUR_CLIENT_ID&permissions=26
 ## 许可证
 
 本项目仅供学习和个人使用。
+
 # PremiumDiscord
