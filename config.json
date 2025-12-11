@@ -1,14 +1,12 @@
 {
-  "token": "YOUR_DISCORD_BOT_TOKEN",
-  "guild_id": 123456789012345678,
-  "yipay_url": "https://your-yipay-domain.com/",
-  "yipay_pid": 1000,
-  "yipay_key": "YOUR_YIPAY_KEY",
-  "payment_types": {
-    "USDT-TRC20": "usdt_trc20",
-    "USDT-BEP20": "usdt_bep20"
+  "token": "MTQ0ODU4NjI4ODQ2MTUxMjgxNw.GY9S_S.9wNSz89LwuyopjJdSzNv_4EExQAn9BZ_ZUCTJA",
+  "guild_id": 1407314814979543071,
+  "epusdt_url": "https://pay.thy1cc.top/",
+  "epusdt_token": "Thy1cc",
+  "payment_methods": {
+    "USDT-TRC20": "trc20"
   },
-  "notify_url": "http://localhost/notify",
+  "notify_url": "http://107.172.1.7:40801/",
   "return_url": "http://localhost/return",
   "database": "bot_data.db"
 }

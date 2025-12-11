@@ -1,16 +1,72 @@
 import os
-from typing import Optional
+from typing import Optional, Dict
+from datetime import datetime
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 from discord.commands import Option
 import sqlite3
 import aiohttp
+from aiohttp import web
 import hashlib
 import time
 import json
 import urllib.parse
+from urllib.parse import urlparse, urlunparse
 
 # ================= 配置区域 =================
+
+def fetch_plans():
+    c.execute("SELECT * FROM plans")
+    return c.fetchall()
+
+def fetch_plan_by_name(name: str):
+    c.execute("SELECT * FROM plans WHERE name = ?", (name,))
+    return c.fetchone()
+
+def build_trade_no(user_id: int, prefix: str = "ORD") -> str:
+    """生成不超过32字符的订单号，前缀+时间戳+用户ID后6位"""
+    ts = int(time.time())
+    suffix = str(user_id % 1_000_000).zfill(6)
+    trade_no = f"{prefix}{ts}{suffix}"
+    return trade_no[:32]
+
+async def fulfill_order(trade_no: str):
+    """在支付确认后为用户发放身份组并写入订阅"""
+    c.execute("SELECT user_id, plan_id FROM orders WHERE order_id = ?", (trade_no,))
+    order = c.fetchone()
+    if not order:
+        print(f"[Webhook] 未找到订单 {trade_no}")
+        return
+    user_id, plan_id = order
+    c.execute("SELECT id, name, price, role_id, duration_months FROM plans WHERE id = ?", (plan_id,))
+    plan = c.fetchone()
+    if not plan:
+        print(f"[Webhook] 未找到订单对应套餐 {plan_id}")
+        return
+    _, _, _, role_id, duration = plan
+
+    guild = bot.get_guild(GUILD_ID)
+    if not guild:
+        print("[Webhook] 未找到指定的 Guild")
+        return
+    member = guild.get_member(user_id)
+    role = guild.get_role(role_id)
+    if not member or not role:
+        print(f"[Webhook] 成员或角色缺失 user={user_id} role={role_id}")
+        return
+
+    try:
+        await member.add_roles(role)
+    except Exception as e:
+        print(f"[Webhook] 赋予角色失败: {e}")
+        return
+
+    current_time = int(time.time())
+    expire_date = -1 if duration == -1 else current_time + (duration * 30 * 24 * 60 * 60)
+    c.execute("INSERT INTO subscriptions (user_id, role_id, plan_id, expire_date, created_at) VALUES (?, ?, ?, ?, ?)",
+              (user_id, role_id, plan_id, expire_date, current_time))
+    conn.commit()
+    print(f"[Webhook] 已为用户 {user_id} 发放角色 {role_id}，订单 {trade_no}")
 
 def load_config(path: Optional[str] = None) -> dict:
     """从配置文件加载设置，默认读取 config.json，可通过环境变量 BOT_CONFIG_PATH 覆盖。"""
@@ -21,16 +77,22 @@ def load_config(path: Optional[str] = None) -> dict:
     with open(config_path, "r", encoding="utf-8") as f:
         config = json.load(f)
 
-    required_keys = ["token", "guild_id", "yipay_url", "yipay_pid", "yipay_key", "payment_types"]
+    required_keys = [
+        "token",
+        "guild_id",
+        "epusdt_url",
+        "epusdt_token",
+        "payment_methods"
+    ]
     missing = [k for k in required_keys if k not in config]
     if missing:
         raise ValueError(f"配置文件缺少必填字段: {', '.join(missing)}")
 
     # 标准化 URL，确保以 / 结尾
-    yipay_url = config.get("yipay_url", "")
-    if not yipay_url.endswith("/"):
-        yipay_url = yipay_url + "/"
-    config["yipay_url"] = yipay_url
+    epusdt_url = config.get("epusdt_url", "")
+    if not epusdt_url.endswith("/"):
+        epusdt_url = epusdt_url + "/"
+    config["epusdt_url"] = epusdt_url
 
     return config
 
@@ -40,18 +102,43 @@ CONFIG = load_config()
 TOKEN = CONFIG["token"]
 GUILD_ID = CONFIG["guild_id"]
 
-# 彩虹易支付配置
-YIPAY_URL = CONFIG["yipay_url"]
-YIPAY_PID = CONFIG["yipay_pid"]
-YIPAY_KEY = CONFIG["yipay_key"]
+# Epusdt 配置
+EPUSDT_URL = CONFIG["epusdt_url"]
+EPUSDT_TOKEN = CONFIG["epusdt_token"]
 
-# 支付通道ID (需要在易支付后台查看对应的ID，例如USDT-TRC20可能是 1001)
-PAYMENT_TYPES = CONFIG["payment_types"]
+# 支付方式映射（显示名 -> 通道代码）
+PAYMENT_METHODS: Dict[str, str] = CONFIG["payment_methods"]
+
+# USDT 转 CNY 汇率（用于将 USDT 价格转换为人民币价格）
+# 例如：1 USDT = 7.2 CNY，则设置为 7.2
+# 如果不设置，默认使用 7.0
+USDT_TO_CNY_RATE = CONFIG.get("usdt_to_cny_rate", 7.0)
 
 # 可选回调与数据库配置
-NOTIFY_URL = CONFIG.get("notify_url", "http://localhost/notify")
-RETURN_URL = CONFIG.get("return_url", "http://localhost/return")
+RAW_NOTIFY_URL = CONFIG.get("notify_url", "http://localhost/notify")
+RETURN_URL = CONFIG.get("return_url", "")
+# Webhook 监听端口（可按需放到配置中，这里默认 8080）
+WEBHOOK_PORT = CONFIG.get("notify_port", 8080)
 DB_PATH = CONFIG.get("database", "bot_data.db")
+
+# 规范化 notify_url，默认补全 /notify
+def normalize_notify_url(raw: str) -> str:
+    parsed = urlparse(raw)
+    scheme = parsed.scheme or "http"
+    netloc = parsed.netloc
+    path = parsed.path
+    if not netloc and parsed.path:
+        # 兼容误写成 http://ip:port 这种少了//的情况
+        # 重新解析
+        reparsed = urlparse(f"http://{raw}")
+        netloc = reparsed.netloc
+        path = reparsed.path
+    if path in ("", "/"):
+        path = "/notify"
+    normalized = urlunparse((scheme, netloc, path, "", "", ""))
+    return normalized
+
+NOTIFY_URL = normalize_notify_url(RAW_NOTIFY_URL)
 
 # ================= 数据库初始化 =================
 conn = sqlite3.connect(DB_PATH)
@@ -87,66 +174,108 @@ conn.commit()
 # ================= 易支付工具类 =================
 class YiPay:
     @staticmethod
-    def generate_sign(params, key):
-        # 易支付签名算法：按键排序，拼接 key=value&...&key=KEY
-        sorted_keys = sorted(params.keys())
-        sign_str = ""
-        for k in sorted_keys:
-            if params[k] != "" and k != "sign" and k != "sign_type":
-                sign_str += f"{k}={params[k]}&"
-        sign_str = sign_str[:-1] + key
-        return hashlib.md5(sign_str.encode('utf-8')).hexdigest()
+    def generate_sign_epusdt(params: Dict[str, str], token: str) -> str:
+        # Epusdt: ASCII 排序，忽略空值与 signature，拼接后追加 token，再 md5 小写
+        items = []
+        for k in sorted(params.keys()):
+            val = params[k]
+            if val == "" or val is None or k == "signature":
+                continue
+            # 若是浮点且为整数，转为 int，避免 "39.0" 与 "39" 不一致
+            if isinstance(val, float) and val.is_integer():
+                val = int(val)
+            items.append(f"{k}={val}")
+        sign_str = "&".join(items) + token
+        return hashlib.md5(sign_str.encode("utf-8")).hexdigest()
 
     @staticmethod
     async def create_order(trade_no, name, money, type_code):
-        params = {
-            "pid": YIPAY_PID,
-            "type": type_code,
-            "out_trade_no": trade_no,
-            "notify_url": NOTIFY_URL, # 机器人通常无公网IP，这里仅作占位
-            "return_url": RETURN_URL,
-            "name": name,
-            "money": f"{money:.2f}",
-            "sitename": "Discord Bot"
+        # money 是 USDT 价格，需要转换为 CNY
+        # Epusdt API 的 amount 参数要求 CNY（人民币）金额
+        usdt_price = float(money)
+        cny_price = round(usdt_price * USDT_TO_CNY_RATE, 2)  # 转换为人民币，保留2位小数
+        
+        # 如果转换后是整数，转为 int（避免 280.0 vs 280 的签名问题）
+        if cny_price.is_integer():
+            amount_val = int(cny_price)
+        else:
+            amount_val = cny_price
+
+        payload = {
+            "order_id": trade_no,
+            "amount": amount_val,
+            "notify_url": NOTIFY_URL
         }
-        params["sign"] = YiPay.generate_sign(params, YIPAY_KEY)
-        params["sign_type"] = "MD5"
-        
-        # 易支付通常是POST表单或GET跳转，这里我们构造支付链接
-        # 很多易支付支持直接GET请求获取支付页，或者返回JSON
-        # 为了兼容性，我们尝试请求 API 获取跳转链接，如果API不支持，直接拼接URL
-        
-        # 方法1: 拼接URL让用户跳转 (最通用)
-        query_string = urllib.parse.urlencode(params)
-        pay_url = f"{YIPAY_URL}submit.php?{query_string}"
-        return pay_url
+        if RETURN_URL:
+            payload["redirect_url"] = RETURN_URL
+
+        payload["signature"] = YiPay.generate_sign_epusdt(payload, EPUSDT_TOKEN)
+
+        api_url = urllib.parse.urljoin(EPUSDT_URL, "api/v1/order/create-transaction")
+        async with aiohttp.ClientSession() as session:
+            async with session.post(api_url, json=payload, timeout=15) as resp:
+                data = await resp.json(content_type=None)
+                if data.get("status_code") != 200 or "data" not in data:
+                    raise RuntimeError(f"Epusdt 下单失败: {data} | payload={payload}")
+                payment_url = data["data"].get("payment_url")
+                if not payment_url:
+                    raise RuntimeError(f"Epusdt 未返回支付链接: {data}")
+                return payment_url
 
     @staticmethod
     async def check_order_status(trade_no):
-        # 查询订单状态
-        params = {
-            "act": "order",
-            "pid": YIPAY_PID,
-            "out_trade_no": trade_no,
-            "key": YIPAY_KEY
-        }
-        async with aiohttp.ClientSession() as session:
-            try:
-                # 注意：不同易支付程序API路径可能不同，常见是 /api.php
-                async with session.get(f"{YIPAY_URL}api.php", params=params) as resp:
-                    data = await resp.json(content_type=None)
-                    # 状态 1 表示支付成功
-                    if data.get('code') == 1 and data.get('status') == 1:
-                        return True
-                    return False
-            except Exception as e:
-                print(f"API Error: {e}")
-                return False
+        # Epusdt 无查询接口，采用“用户点击已支付”直接确认模式
+        return True
+
+
+# ================= Webhook 监听（异步回调） =================
+async def handle_notify(request: web.Request):
+    try:
+        data = await request.json()
+        signature = data.get("signature")
+        local_sign = YiPay.generate_sign_epusdt(data, EPUSDT_TOKEN)
+        if signature != local_sign:
+            return web.Response(text="fail", status=403)
+
+        # status == 2 表示支付成功
+        if str(data.get("status")) == "2":
+            trade_no = data.get("order_id")
+            if trade_no:
+                c.execute("UPDATE orders SET status = 'paid' WHERE order_id = ?", (trade_no,))
+                conn.commit()
+                print(f"[Webhook] 订单 {trade_no} 支付成功")
+                # 异步发放身份组
+                bot.loop.create_task(fulfill_order(trade_no))
+        return web.Response(text="ok")
+    except Exception as e:
+        print(f"[Webhook] Error: {e}")
+        return web.Response(text="error", status=500)
+
+
+async def start_web_server():
+    global web_runner, web_site
+    if web_runner:
+        return
+    app = web.Application()
+    parsed = urlparse(NOTIFY_URL)
+    notify_path = parsed.path or "/notify"
+    if notify_path == "/":
+        notify_path = "/notify"
+    app.router.add_post(notify_path, handle_notify)
+    web_runner = web.AppRunner(app)
+    await web_runner.setup()
+    web_site = web.TCPSite(web_runner, "0.0.0.0", WEBHOOK_PORT)
+    await web_site.start()
+    print(f"🌍 Webhook Server running on 0.0.0.0:{WEBHOOK_PORT} path={notify_path}")
 
 # ================= Discord Bot 设置 =================
 intents = discord.Intents.default()
 intents.members = True # 必须开启，用于赋予身份组
 bot = discord.Bot(intents=intents)
+
+# webhook server 控制
+web_runner: Optional[web.AppRunner] = None
+web_site: Optional[web.TCPSite] = None
 
 # ================= UI 交互视图 =================
 
@@ -157,66 +286,47 @@ class PaymentVerifyView(discord.ui.View):
         self.plan_info = plan_info # (id, name, price, role_id, duration)
         self.user_id = user_id
 
-    @discord.ui.button(label="✅ 我已完成支付", style=discord.ButtonStyle.success)
-    async def check_payment(self, button: discord.ui.Button, interaction: discord.Interaction):
-        await interaction.response.defer()
-        
-        # 检查支付状态
-        is_paid = await YiPay.check_order_status(self.trade_no)
-        
-        if is_paid:
-            # 检查订单是否已经处理过
-            c.execute("SELECT status FROM orders WHERE order_id = ?", (self.trade_no,))
-            order = c.fetchone()
-            if order and order[0] == 'paid':
-                await interaction.followup.send("⚠️ 该订单已经处理过了。", ephemeral=True)
-                return
-            
-            # 支付成功逻辑
-            role_id = self.plan_info[3]
-            guild = interaction.guild
-            role = guild.get_role(role_id)
-            member = guild.get_member(self.user_id)
-            
-            if role and member:
-                try:
-                    await member.add_roles(role)
-                    
-                    # 更新数据库订单状态
-                    c.execute("UPDATE orders SET status = 'paid' WHERE order_id = ?", (self.trade_no,))
-                    
-                    # 计算过期时间并存入订阅表
-                    plan_id = self.plan_info[0]
-                    duration = self.plan_info[4]
-                    current_time = int(time.time())
-                    
-                    if duration == -1:
-                        expire_date = -1  # 永久
-                    else:
-                        # 计算过期时间戳（duration个月后）
-                        expire_date = current_time + (duration * 30 * 24 * 60 * 60)  # 简单按30天/月计算
-                    
-                    c.execute("INSERT INTO subscriptions (user_id, role_id, plan_id, expire_date, created_at) VALUES (?, ?, ?, ?, ?)",
-                              (self.user_id, role_id, plan_id, expire_date, current_time))
-                    
-                    conn.commit()
-                    
-                    await interaction.followup.send(f"🎉 **支付成功！** 您已自动获得 {role.mention} 身份组！", ephemeral=True)
-                    # 禁用按钮
-                    button.disabled = True
-                    button.label = "已开通"
-                    await interaction.edit_original_response(view=self)
-                except Exception as e:
-                    await interaction.followup.send(f"⚠️ 支付成功，但在赋予身份组时出错：{e}，请联系管理员。", ephemeral=True)
-            else:
-                await interaction.followup.send("⚠️ 未找到对应的身份组或用户，请联系管理员。", ephemeral=True)
-        else:
-            await interaction.followup.send("⏳ 尚未查询到支付成功记录，请支付稍等片刻后再试。", ephemeral=True)
+    # 已弃用按钮，避免用户手动确认
+    # 保留类以兼容旧代码，但不添加按钮
+
+class NetworkSelect(discord.ui.Select):
+    def __init__(self, view, plan_info=None):
+        # plan_info: (id, name, price, role_id, duration) or None before plan chosen
+        self.plan_info = plan_info
+        self.code_to_name = {v: k for k, v in PAYMENT_METHODS.items()}
+        options = []
+        for display_name, type_code in PAYMENT_METHODS.items():
+            options.append(
+                discord.SelectOption(
+                    label=display_name,
+                    value=type_code,
+                    description=str(type_code)
+                )
+            )
+        super().__init__(
+            placeholder="选择支付网络",
+            min_values=1,
+            max_values=1,
+            options=options,
+            custom_id="network_select"
+        )
+        self.parent_view = view
+
+    async def callback(self, interaction: discord.Interaction):
+        if not self.parent_view.selected_plan:
+            await interaction.response.send_message("请先选择套餐，再选择支付网络。", ephemeral=True)
+            return
+        self.plan_info = self.parent_view.selected_plan
+        type_code = self.values[0]
+        network_name = self.code_to_name.get(type_code, type_code)
+        await self.parent_view.generate_payment(interaction, network_name, type_code)
+
 
 class NetworkSelectView(discord.ui.View):
     def __init__(self, plan_info):
         super().__init__(timeout=120)
         self.plan_info = plan_info # (id, name, price, role_id, duration)
+        self.add_item(NetworkSelect(self, plan_info))
 
     async def generate_payment(self, interaction, network_name, type_code):
         user_id = interaction.user.id
@@ -224,7 +334,7 @@ class NetworkSelectView(discord.ui.View):
         price = self.plan_info[2]
         
         # 生成订单号
-        trade_no = f"ORDER_{int(time.time())}_{user_id}"
+        trade_no = build_trade_no(user_id)
         
         # 存入数据库
         c.execute("INSERT INTO orders VALUES (?, ?, ?, ?, ?)", 
@@ -234,57 +344,121 @@ class NetworkSelectView(discord.ui.View):
         # 获取支付链接
         pay_url = await YiPay.create_order(trade_no, f"Plan-{plan_name}", price, type_code)
         
-        embed = discord.Embed(title="💳 订单已创建", description=f"请点击下方链接支付 **{price} USDT**", color=0x00ff00)
+        embed = discord.Embed(title="💳 订单已创建", description=f"请点击下方链接支付 **{price} USDT**", color=0xF6C344)
         embed.add_field(name="套餐", value=plan_name, inline=True)
         embed.add_field(name="网络", value=network_name, inline=True)
         embed.add_field(name="🔗 支付链接", value=f"[👉 点击前往支付]({pay_url})", inline=False)
-        embed.set_footer(text='支付完成后，请务必点击下方的"我已完成支付"按钮')
+        embed.set_footer(text='支付完成后，系统会自动开通会员')
         
-        await interaction.response.send_message(embed=embed, view=PaymentVerifyView(trade_no, self.plan_info, user_id), ephemeral=True)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    @discord.ui.button(label="USDT - TRC20", style=discord.ButtonStyle.primary, emoji="🔗")
-    async def trc20_pay(self, button, interaction):
-        await self.generate_payment(interaction, "TRC20", PAYMENT_TYPES["USDT-TRC20"])
 
-    @discord.ui.button(label="USDT - BEP20", style=discord.ButtonStyle.primary, emoji="🔗")
-    async def bep20_pay(self, button, interaction):
-        await self.generate_payment(interaction, "BEP20", PAYMENT_TYPES["USDT-BEP20"])
+class PlanSelect(discord.ui.Select):
+    def __init__(self, view, plans):
+        # plans: list of (id, name, price, role_id, duration)
+        self.plan_map = {str(p[0]): p for p in plans}
+        options = []
+        for p in plans:
+            plan_id, name, price, _, duration = p
+            if duration == -1:
+                suffix = "永久"
+            elif duration == 1:
+                suffix = "月"
+            elif duration == 12:
+                suffix = "年"
+            else:
+                suffix = f"{duration}个月"
+            options.append(
+                discord.SelectOption(
+                    label=f"{name} ({price} USDT)",
+                    value=str(plan_id),
+                    description=f"时长: {suffix}"
+                )
+            )
+        super().__init__(
+            placeholder="选择会员套餐",
+            min_values=1,
+            max_values=1,
+            options=options,
+            custom_id="plan_select"
+        )
+        self.parent_view = view
 
-class PlanSelectView(discord.ui.View):
+    async def callback(self, interaction: discord.Interaction):
+        selected_id = self.values[0]
+        plan = self.plan_map.get(selected_id)
+        if not plan:
+            await interaction.response.send_message("❌ 未找到该套餐，请重试。", ephemeral=True)
+            return
+        self.parent_view.selected_plan = plan
+        # 启用网络选择并更新消息
+        if hasattr(self.parent_view, "network_select"):
+            self.parent_view.network_select.disabled = False
+            self.parent_view.network_select.placeholder = "选择支付网络"
+            self.parent_view.network_select.plan_info = plan
+        # 高亮已选套餐
+        for opt in self.options:
+            opt.default = (opt.value == selected_id)
+        self.placeholder = f"已选：{plan[1]}"
+        await interaction.response.edit_message(content=f"已选择套餐：**{plan[1]}**，请继续选择支付网络。", view=self.parent_view)
+
+
+class PlanAndNetworkView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
-        # 从数据库加载按钮
-        self.reload_buttons()
+        self.selected_plan = None
+        self.reload_selects()
 
-    def reload_buttons(self):
+    def reload_selects(self):
         self.clear_items()
-        c.execute("SELECT * FROM plans")
-        plans = c.fetchall()
-        
-        for plan in plans:
-            # plan: (id, name, price, role_id, duration)
-            label = f"{plan[1]} ({plan[2]} USDT)"
-            custom_id = f"plan_{plan[0]}"
-            
-            button = discord.ui.Button(
-                label=label,
-                style=discord.ButtonStyle.secondary,
-                custom_id=custom_id,
-                emoji="💎"
-            )
-            # 绑定回调
-            button.callback = self.create_callback(plan)
-            self.add_item(button)
+        plans = fetch_plans()
 
-    def create_callback(self, plan):
-        async def callback(interaction: discord.Interaction):
-            # 弹出选择网络
-            await interaction.response.send_message(
-                f"您选择了 **{plan[1]}**，请选择支付网络：", 
-                view=NetworkSelectView(plan), 
-                ephemeral=True
+        if not plans:
+            disabled_select = discord.ui.Select(
+                placeholder="暂无套餐，管理员请先配置 /set_plan",
+                options=[],
+                disabled=True,
+                custom_id="plan_select_disabled"
             )
-        return callback
+            self.add_item(disabled_select)
+            return
+
+        plan_select = PlanSelect(self, plans)
+        self.add_item(plan_select)
+
+        # 网络下拉默认禁用，待选择套餐后启用
+        network_select = NetworkSelect(self, None)
+        network_select.disabled = True
+        network_select.placeholder = "请先选择套餐，再选择支付网络"
+        self.network_select = network_select
+        self.add_item(network_select)
+
+    async def generate_payment(self, interaction, network_name, type_code):
+        if not self.selected_plan:
+            await interaction.response.send_message("请先选择套餐。", ephemeral=True)
+            return
+        user_id = interaction.user.id
+        plan_name = self.selected_plan[1]
+        price = self.selected_plan[2]
+        
+        # 生成订单号
+        trade_no = build_trade_no(user_id)
+        
+        # 存入数据库
+        c.execute("INSERT INTO orders VALUES (?, ?, ?, ?, ?)", 
+                  (trade_no, user_id, self.selected_plan[0], 'pending', int(time.time())))
+        conn.commit()
+        
+        # 获取支付链接
+        pay_url = await YiPay.create_order(trade_no, f"Plan-{plan_name}", price, type_code)
+        
+        embed = discord.Embed(title="💳 订单已创建", description=f"请点击下方链接支付 **{price} USDT**", color=0xF6C344)
+        embed.add_field(name="套餐", value=plan_name, inline=True)
+        embed.add_field(name="支付方式", value=network_name, inline=True)
+        embed.add_field(name="🔗 支付链接", value=f"[👉 点击前往支付]({pay_url})", inline=False)
+        embed.set_footer(text='支付完成后，系统会自动开通会员')
+        
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
 # ================= 斜杠指令 (Admin) =================
 
@@ -314,11 +488,19 @@ async def set_plan(
 @bot.slash_command(guild_ids=[GUILD_ID], description="发送充值面板")
 @commands.has_permissions(administrator=True)
 async def send_panel(ctx):
+    # 权限自检，避免 Missing Access
+    channel = ctx.channel
+    me = ctx.guild.me
+    perms = channel.permissions_for(me)
+    if not (perms.send_messages and perms.embed_links and perms.view_channel):
+        await ctx.respond("❌ 机器人在此频道缺少发送消息或嵌入权限，请管理员为机器人开启：发送消息、嵌入链接。", ephemeral=True)
+        return
+
     # 构建主 Embed (价格表)
     embed_main = discord.Embed(
         title="LEVEL UP YOUR TRADING 🚀",
-        description="提升您的交易体验，获取独家内幕与分析。",
-        color=0x2b2d31
+        description="选择套餐 → 选择支付方式 → 支付 → 自动开通会员",
+        color=0xF6C344  # 黄色边框
     )
     
     # 动态从数据库读取价格显示在 Embed 中
@@ -341,25 +523,16 @@ async def send_panel(ctx):
     if not price_text:
         price_text = "暂无套餐配置，请使用管理员指令配置。"
 
+    steps_text = "```\n✅ 选套餐 + 支付方式\n💳 点击前往支付\n🔗 完成支付\n🎉 自动开通会员\n```"
+
     embed_main.add_field(name="💰 会员价格", value=price_text, inline=False)
+    embed_main.add_field(name="📌 开通步骤", value=steps_text, inline=False)
     embed_main.set_thumbnail(url="https://cdn-icons-png.flaticon.com/512/3135/3135715.png") # 示例图标
 
-    # 构建副 Embed (流程说明) - 这就是你要的"二次嵌入"效果，其实是第二个Embed
-    embed_steps = discord.Embed(
-        title="🎯 快速开通步骤",
-        description=(
-            "✅ **选套餐 + 网络**\n"
-            "💳 **点击前往支付**\n"
-            "🔗 **完成支付**\n"
-            "🎉 **自动开通会员**"
-        ),
-        color=0x5865F2
-    )
-    
-    view = PlanSelectView()
-    # 同时发送两个 Embeds
-    await ctx.send(embeds=[embed_main, embed_steps], view=view)
-    await ctx.respond("✅ 面板已发送", ephemeral=True)
+    # 先响应，再发送面板，避免 Unknown interaction
+    await ctx.respond("✅ 正在发送面板...", ephemeral=True)
+    view = PlanAndNetworkView()
+    await ctx.send(embed=embed_main, view=view)
 
 @bot.slash_command(guild_ids=[GUILD_ID], description="删除套餐")
 @commands.has_permissions(administrator=True)
@@ -387,18 +560,170 @@ async def list_plans(ctx):
     else:
         await ctx.respond("❌ 暂无套餐配置", ephemeral=True)
 
+@bot.slash_command(guild_ids=[GUILD_ID], description="手动授予用户会员（管理员）")
+@commands.has_permissions(administrator=True)
+async def grant_member(
+    ctx,
+    user: Option(discord.Member, "要授予的用户"),
+    plan_name: Option(str, "套餐名称，需与 /set_plan 中的名称一致")
+):
+    plan = fetch_plan_by_name(plan_name)
+    if not plan:
+        await ctx.respond(f"❌ 未找到套餐 **{plan_name}**，请确认名称是否一致。", ephemeral=True)
+        return
+
+    plan_id, name, price, role_id, duration = plan
+    role = ctx.guild.get_role(role_id)
+    if not role:
+        await ctx.respond(f"❌ 未找到套餐对应的身份组（role_id={role_id}），请检查配置。", ephemeral=True)
+        return
+
+    try:
+        await user.add_roles(role)
+    except Exception as e:
+        await ctx.respond(f"⚠️ 授予身份组失败：{e}", ephemeral=True)
+        return
+
+    # 写入订单和订阅记录，状态设为手动付费
+    trade_no = f"MANUAL_{int(time.time())}_{user.id}"
+    current_time = int(time.time())
+    if duration == -1:
+        expire_date = -1
+    else:
+        expire_date = current_time + (duration * 30 * 24 * 60 * 60)
+
+    c.execute("INSERT INTO orders VALUES (?, ?, ?, ?, ?)",
+              (trade_no, user.id, plan_id, 'paid', current_time))
+    c.execute("INSERT INTO subscriptions (user_id, role_id, plan_id, expire_date, created_at) VALUES (?, ?, ?, ?, ?)",
+              (user.id, role_id, plan_id, expire_date, current_time))
+    conn.commit()
+
+    expire_text = "永久" if duration == -1 else f"{duration} 个月"
+    await ctx.respond(f"✅ 已为 {user.mention} 授予 {role.mention}（{expire_text}）。", ephemeral=True)
+
+@bot.slash_command(guild_ids=[GUILD_ID], description="测试回调功能（模拟支付成功，无需真实支付）")
+@commands.has_permissions(administrator=True)
+async def test_callback(
+    ctx,
+    order_id: Option(str, "要测试的订单号（从订单记录中获取）")
+):
+    """模拟 Epusdt 回调，测试支付成功流程"""
+    # 检查订单是否存在
+    c.execute("SELECT user_id, plan_id, status FROM orders WHERE order_id = ?", (order_id,))
+    order = c.fetchone()
+    if not order:
+        await ctx.respond(f"❌ 未找到订单 **{order_id}**。请先创建一个订单（通过购买流程）。", ephemeral=True)
+        return
+    
+    user_id, plan_id, current_status = order
+    if current_status == 'paid':
+        await ctx.respond(f"⚠️ 订单 **{order_id}** 已经是已支付状态。", ephemeral=True)
+        return
+    
+    # 获取套餐信息以构造回调数据
+    c.execute("SELECT name, price FROM plans WHERE id = ?", (plan_id,))
+    plan = c.fetchone()
+    if not plan:
+        await ctx.respond(f"❌ 未找到订单对应的套餐信息。", ephemeral=True)
+        return
+    
+    plan_name, price = plan
+    
+    # 构造模拟的回调数据（按照 Epusdt 回调格式）
+    mock_callback_data = {
+        "trade_id": f"TEST_{int(time.time())}",
+        "order_id": order_id,
+        "amount": float(price),
+        "actual_amount": float(price),
+        "token": "TEST_TOKEN",
+        "block_transaction_id": f"TEST_BLOCK_{int(time.time())}",
+        "status": 2  # 2 表示支付成功
+    }
+    
+    # 生成签名
+    mock_callback_data["signature"] = YiPay.generate_sign_epusdt(mock_callback_data, EPUSDT_TOKEN)
+    
+    # 模拟调用 handle_notify 的逻辑
+    try:
+        # 更新订单状态
+        c.execute("UPDATE orders SET status = 'paid' WHERE order_id = ?", (order_id,))
+        conn.commit()
+        
+        # 异步发放身份组
+        await fulfill_order(order_id)
+        
+        member = ctx.guild.get_member(user_id)
+        if member:
+            await ctx.respond(
+                f"✅ **测试回调成功！**\n"
+                f"订单号：`{order_id}`\n"
+                f"用户：{member.mention}\n"
+                f"状态：已支付 → 身份组已发放\n\n"
+                f"📋 回调数据签名：`{mock_callback_data['signature']}`",
+                ephemeral=True
+            )
+        else:
+            await ctx.respond(
+                f"✅ **测试回调成功！**\n"
+                f"订单号：`{order_id}`\n"
+                f"用户ID：{user_id}\n"
+                f"状态：已支付 → 身份组已发放\n\n"
+                f"⚠️ 注意：用户不在当前服务器中，无法验证身份组发放。",
+                ephemeral=True
+            )
+    except Exception as e:
+        await ctx.respond(f"❌ 测试回调时出错：{e}", ephemeral=True)
+
+@bot.slash_command(guild_ids=[GUILD_ID], description="查看订单记录")
+@commands.has_permissions(administrator=True)
+async def list_orders(
+    ctx,
+    status: Option(str, "订单状态筛选（pending/paid，留空查看全部）", default=None, required=False)
+):
+    """查看订单记录"""
+    if status:
+        c.execute("SELECT order_id, user_id, plan_id, status, created_at FROM orders WHERE status = ? ORDER BY created_at DESC LIMIT 20", (status,))
+    else:
+        c.execute("SELECT order_id, user_id, plan_id, status, created_at FROM orders ORDER BY created_at DESC LIMIT 20")
+    
+    orders = c.fetchall()
+    if not orders:
+        await ctx.respond("❌ 暂无订单记录", ephemeral=True)
+        return
+    
+    order_list = []
+    for order in orders:
+        order_id, user_id, plan_id, order_status, created_at = order
+        c.execute("SELECT name FROM plans WHERE id = ?", (plan_id,))
+        plan_name = c.fetchone()
+        plan_name_str = plan_name[0] if plan_name else "未知套餐"
+        
+        # 格式化时间
+        time_str = datetime.fromtimestamp(created_at).strftime("%Y-%m-%d %H:%M:%S")
+        
+        status_emoji = "✅" if order_status == "paid" else "⏳"
+        order_list.append(f"{status_emoji} `{order_id}` - {plan_name_str} - <@{user_id}> - {order_status} - {time_str}")
+    
+    await ctx.respond(
+        f"📋 **订单记录**（最近20条）\n\n" + "\n".join(order_list),
+        ephemeral=True
+    )
+
 # ================= 定时任务：检查到期订阅 =================
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user}")
     # 重启后保持按钮监听状态
-    bot.add_view(PlanSelectView())
+    bot.add_view(PlanAndNetworkView())
+    # 启动 webhook 服务器（用于接收 Epusdt 回调）
+    await start_web_server()
     
     # 启动定时任务检查到期订阅
     check_expired_subscriptions.start()
+    # 启动时立即跑一次过期检查
+    await process_expired_subscriptions()
 
-@bot.tasks.loop(hours=24)  # 每24小时检查一次
-async def check_expired_subscriptions():
+async def process_expired_subscriptions():
     """检查并移除过期的订阅"""
     current_time = int(time.time())
     c.execute("SELECT user_id, role_id, id FROM subscriptions WHERE expire_date != -1 AND expire_date < ?", (current_time,))
@@ -421,6 +746,10 @@ async def check_expired_subscriptions():
     
     conn.commit()
     print(f"检查完成，处理了 {len(expired)} 个过期订阅")
+
+@tasks.loop(minutes=60)  # 每小时检查一次
+async def check_expired_subscriptions():
+    await process_expired_subscriptions()
 
 @check_expired_subscriptions.before_loop
 async def before_check_expired():
