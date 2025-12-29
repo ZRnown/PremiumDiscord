@@ -22,7 +22,10 @@ try:
     # 尝试discord.py 2.0+风格
     if intents_available:
         intents = discord.Intents.default()
-        intents.members = True
+        if ENABLE_PRIVILEGED_INTENTS:
+            intents.members = True  # 只有在明确启用时才设置privileged intent
+        else:
+            intents.members = False
         bot = discord.Bot(intents=intents)
         DISCORD_PY_VERSION = 2
     else:
@@ -31,9 +34,11 @@ except AttributeError:
     # 回退到commands.Bot
     try:
         if intents_available:
-            # 一些版本的commands.Bot需要intents
             intents = discord.Intents.default()
-            intents.members = True
+            if ENABLE_PRIVILEGED_INTENTS:
+                intents.members = True
+            else:
+                intents.members = False  # 默认禁用privileged intents
             bot = ext_commands.Bot(command_prefix='!', intents=intents)
             DISCORD_PY_VERSION = 1.5
         else:
@@ -214,6 +219,7 @@ CONFIG = load_config()
 TOKEN = CONFIG["token"]
 GUILD_ID = CONFIG["guild_id"]
 PAYMENT_PLATFORM = CONFIG.get("payment_platform", "epusdt")
+ENABLE_PRIVILEGED_INTENTS = CONFIG.get("enable_privileged_intents", False)
 
 # 支付平台配置
 if PAYMENT_PLATFORM == "yipay":

@@ -52,6 +52,7 @@ pip install -r requirements.txt
        "USDT": "usdt"
      }
      ```
+   - `enable_privileged_intents`: 是否启用特权intents（默认false）
    - 可选项：`notify_url`、`return_url`、`database`（数据库文件名）
 
 > 如需使用自定义路径，设置环境变量 `BOT_CONFIG_PATH=/path/to/your_config.json`。
@@ -64,7 +65,26 @@ pip install -r requirements.txt
 - `applications.commands`
 - `Manage Roles`（管理身份组）
 
-### 4. 邀请机器人
+### 4. 配置机器人权限
+
+#### 特权Intents设置（重要）
+
+如果你的机器人需要访问成员信息，请在 [Discord开发者门户](https://discord.com/developers/applications/) 中启用特权intents：
+
+1. 进入你的应用页面
+2. 点击 "Bot" 标签
+3. 在 "Privileged Gateway Intents" 部分启用：
+   - ✅ Server Members Intent（服务器成员意图）
+   - ✅ Message Content Intent（消息内容意图）
+
+然后在 `config.json` 中设置：
+```json
+"enable_privileged_intents": true
+```
+
+如果不需要这些特权功能，保持默认值 `false` 即可。
+
+### 5. 邀请机器人
 
 使用以下链接邀请机器人（替换 `YOUR_CLIENT_ID` 为你的机器人客户端 ID）：
 
