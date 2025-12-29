@@ -141,11 +141,13 @@ from urllib.parse import urlparse, urlunparse
 # ================= 配置区域 =================
 
 def fetch_plans():
-    c.execute("SELECT * FROM plans")
+    # 强制指定顺序：id, name, price, currency, role_id, duration_months
+    c.execute("SELECT id, name, price, currency, role_id, duration_months FROM plans")
     return c.fetchall()
 
 def fetch_plan_by_name(name: str):
-    c.execute("SELECT * FROM plans WHERE name = ?", (name,))
+    # 强制指定顺序：id, name, price, currency, role_id, duration_months
+    c.execute("SELECT id, name, price, currency, role_id, duration_months FROM plans WHERE name = ?", (name,))
     return c.fetchone()
 
 def build_trade_no(user_id: int, prefix: str = "ORD") -> str:
@@ -163,7 +165,7 @@ async def fulfill_order(trade_no: str):
         print(f"[Webhook] 未找到订单 {trade_no}")
         return
     user_id, plan_id = order
-    c.execute("SELECT id, name, price, role_id, duration_months FROM plans WHERE id = ?", (plan_id,))
+    c.execute("SELECT id, name, price, currency, role_id, duration_months FROM plans WHERE id = ?", (plan_id,))
     plan = c.fetchone()
     if not plan:
         print(f"[Webhook] 未找到订单对应套餐 {plan_id}")
