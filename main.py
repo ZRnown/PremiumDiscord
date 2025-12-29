@@ -662,8 +662,20 @@ class PlanSelect(ui.Select):
             # 确保价格格式化正确
             formatted_price = f"{round(float(price), 2):g}"  # 移除不必要的.0
 
+            # 创建更清晰的标签格式
+            if duration == -1:
+                duration_text = "永久"
+            elif duration == 1:
+                duration_text = "月度"
+            elif duration == 12:
+                duration_text = "年度"
+            else:
+                duration_text = f"{duration}个月"
+
+            # 标签格式：套餐名 - 价格 - 时长
+            label = f"{name} - {formatted_price} {currency} - {duration_text}"
+
             # 确保label长度不超过100字符（Discord限制）
-            label = f"{name} ({formatted_price} {currency})"
             if len(label) > 100:
                 label = label[:97] + "..."
 
@@ -807,6 +819,16 @@ async def set_plan(
 ):
     # 使用配置文件中的默认货币单位
     currency = DEFAULT_CURRENCY
+    print(f"调试: set_plan - 名称:{name}, 价格:{price}, 货币:{currency}, 时长:{duration}")
+
+    # 检查价格是否合理
+    if currency == 'CNY' and price > 1000:
+        await ctx.respond(f"❌ CNY价格不能超过1000元！当前价格: {price} CNY", ephemeral=True)
+        return
+    elif currency == 'USDT' and price * USDT_TO_CNY_RATE > 1000:
+        cny_equivalent = round(price * USDT_TO_CNY_RATE, 2)
+        await ctx.respond(f"❌ USDT价格转换后超过1000元！{price} USDT = {cny_equivalent} CNY", ephemeral=True)
+        return
 
     # 检查是否已存在同名套餐，存在则更新，不存在则插入
     c.execute("SELECT id FROM plans WHERE name = ?", (name,))
@@ -820,6 +842,8 @@ async def set_plan(
                   (name, price, currency, role.id, duration))
         action = "添加"
     conn.commit()
+
+    print(f"调试: {action}套餐成功 - {name}: {price} {currency}")
     await ctx.respond(f"✅ 已{action}套餐 **{name}**: {price} {currency.upper()} -> {role.mention}", ephemeral=True)
 
 @slash_command(guild_ids=[GUILD_ID], description="发送充值面板")
