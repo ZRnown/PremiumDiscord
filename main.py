@@ -81,7 +81,11 @@ except (AttributeError, TypeError):
     print("pip uninstall discord.py -y")
     print("pip install py-cord>=2.4.0")
     print("然后重新运行: python3 main.py")
-    exit(1)  # 强制退出，要求用户安装Py-cord
+
+    # 只有在实际运行时才退出，在导入测试时不退出
+    import sys
+    if __name__ == "__main__":
+        exit(1)  # 强制退出，要求用户安装Py-cord
 
 def slash_command(*args, **kwargs):
     """Py-cord slash command装饰器"""
@@ -558,6 +562,10 @@ class NetworkSelect(ui.Select):
         if not self.parent_view.selected_plan:
             await interaction.response.send_message("请先选择套餐，再选择支付网络。", ephemeral=True)
             return
+
+        # 先defer响应，避免超时
+        await interaction.response.defer(ephemeral=True)
+
         self.plan_info = self.parent_view.selected_plan
         type_code = self.values[0]
         network_name = self.code_to_name.get(type_code, type_code)
@@ -579,12 +587,20 @@ class NetworkSelectView(ui.View):
         trade_no = build_trade_no(user_id)
         
         # 存入数据库
-        c.execute("INSERT INTO orders VALUES (?, ?, ?, ?, ?)", 
+        c.execute("INSERT INTO orders VALUES (?, ?, ?, ?, ?)",
                   (trade_no, user_id, self.plan_info[0], 'pending', int(time.time())))
         conn.commit()
-        
+
+        # 根据支付方式决定传递给支付平台的金额
+        if type_code in ['alipay', 'wxpay', 'qqpay']:
+            # 人民币支付：转换USDT到CNY
+            payment_amount = round(price * USDT_TO_CNY_RATE, 2)
+        else:
+            # USDT支付：直接使用USDT金额
+            payment_amount = price
+
         # 获取支付链接
-        pay_url = await YiPay.create_order(trade_no, f"Plan-{plan_name}", price, type_code)
+        pay_url = await YiPay.create_order(trade_no, f"Plan-{plan_name}", payment_amount, type_code)
         
         embed = discord.Embed(title="💳 订单已创建", description=f"请点击下方链接支付 **{price} USDT**", color=0xF6C344)
         embed.add_field(name="套餐", value=plan_name, inline=True)
@@ -710,20 +726,38 @@ class PlanAndNetworkView(ui.View):
         trade_no = build_trade_no(user_id)
         
         # 存入数据库
-        c.execute("INSERT INTO orders VALUES (?, ?, ?, ?, ?)", 
+        c.execute("INSERT INTO orders VALUES (?, ?, ?, ?, ?)",
                   (trade_no, user_id, self.selected_plan[0], 'pending', int(time.time())))
         conn.commit()
-        
+
+        # 根据支付方式决定传递给支付平台的金额
+        if type_code in ['alipay', 'wxpay', 'qqpay']:
+            # 人民币支付：转换USDT到CNY
+            payment_amount = round(price * USDT_TO_CNY_RATE, 2)
+        else:
+            # USDT支付：直接使用USDT金额
+            payment_amount = price
+
         # 获取支付链接
-        pay_url = await YiPay.create_order(trade_no, f"Plan-{plan_name}", price, type_code)
-        
-        embed = discord.Embed(title="💳 订单已创建", description=f"请点击下方链接支付 **{price} USDT**", color=0xF6C344)
+        pay_url = await YiPay.create_order(trade_no, f"Plan-{plan_name}", payment_amount, type_code)
+
+        # 根据支付方式决定显示的货币单位
+        currency_unit = "USDT"
+        if type_code in ['alipay', 'wxpay', 'qqpay']:
+            currency_unit = "CNY"
+            # 对于CNY支付，显示转换后的价格
+            cny_price = round(price * USDT_TO_CNY_RATE, 2)
+            display_price = cny_price
+        else:
+            display_price = price
+
+        embed = discord.Embed(title="💳 订单已创建", description=f"请点击下方链接支付 **{display_price} {currency_unit}**", color=0xF6C344)
         embed.add_field(name="套餐", value=plan_name, inline=True)
         embed.add_field(name="支付方式", value=network_name, inline=True)
         embed.add_field(name="🔗 支付链接", value=f"[👉 点击前往支付]({pay_url})", inline=False)
         embed.set_footer(text='支付完成后，系统会自动开通会员')
-        
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
 # ================= 斜杠指令 (Admin) =================
 
