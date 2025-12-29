@@ -600,7 +600,7 @@ class PlanSelect(ui.Select):
         # plans: list of (id, name, price, role_id, duration)
         self.plan_map = {str(p[0]): p for p in plans}
         options = []
-        for p in plans:
+        for p in plans[:25]:  # 限制最多25个选项
             plan_id, name, price, _, duration = p
             if duration == -1:
                 suffix = "永久"
@@ -610,11 +610,27 @@ class PlanSelect(ui.Select):
                 suffix = "年"
             else:
                 suffix = f"{duration}个月"
+
+            # 确保label长度不超过100字符（Discord限制）
+            label = f"{name} ({price} USDT)"
+            if len(label) > 100:
+                label = label[:97] + "..."
+
             options.append(
                 SelectOption(
-                    label=f"{name} ({price} USDT)",
+                    label=label,
                     value=str(plan_id),
                     description=f"时长: {suffix}"
+                )
+            )
+
+        # 如果没有选项，添加一个占位符
+        if not options:
+            options.append(
+                SelectOption(
+                    label="暂无套餐",
+                    value="no_plans",
+                    description="请管理员配置套餐"
                 )
             )
         super().__init__(
@@ -656,9 +672,16 @@ class PlanAndNetworkView(ui.View):
         plans = fetch_plans()
 
         if not plans:
+            # 创建一个有占位符选项的禁用选择器
             disabled_select = ui.Select(
                 placeholder="暂无套餐，管理员请先配置 /set_plan",
-                options=[],
+                options=[
+                    SelectOption(
+                        label="请先配置套餐",
+                        value="no_plans",
+                        description="使用 /set_plan 命令添加套餐"
+                    )
+                ],
                 disabled=True,
                 custom_id="plan_select_disabled"
             )
@@ -771,10 +794,9 @@ async def send_panel(ctx):
     embed_main.add_field(name="📌 开通步骤", value=steps_text, inline=False)
     embed_main.set_thumbnail(url="https://cdn-icons-png.flaticon.com/512/3135/3135715.png") # 示例图标
 
-    # 先响应，再发送面板，避免 Unknown interaction
-    await ctx.respond("✅ 正在发送面板...", ephemeral=True)
+    # 在slash command中直接回复包含embed和view的消息
     view = PlanAndNetworkView()
-    await ctx.send(embed=embed_main, view=view)
+    await ctx.respond(embed=embed_main, view=view)
 
 @slash_command(guild_ids=[GUILD_ID], description="删除套餐")
 @commands.has_permissions(administrator=True)
