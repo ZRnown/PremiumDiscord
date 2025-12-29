@@ -7,6 +7,9 @@ from discord.ext import commands, tasks
 # 兼容不同版本的discord.py
 from discord.ext import commands as ext_commands
 
+# 先设置默认值，避免NameError
+ENABLE_PRIVILEGED_INTENTS = False  # 默认禁用privileged intents
+
 # 动态检测需要的参数
 DISCORD_PY_VERSION = 1
 intents = None
@@ -18,38 +21,48 @@ try:
 except AttributeError:
     intents_available = False
 
-try:
-    # 尝试discord.py 2.0+风格
-    if intents_available:
-        intents = discord.Intents.default()
-        if ENABLE_PRIVILEGED_INTENTS:
-            intents.members = True  # 只有在明确启用时才设置privileged intent
-        else:
-            intents.members = False
-        bot = discord.Bot(intents=intents)
-        DISCORD_PY_VERSION = 2
-    else:
-        raise AttributeError("No Intents available")
-except AttributeError:
-    # 回退到commands.Bot
+# Bot创建逻辑（将在CONFIG加载后重新配置）
+bot = None
+
+def create_bot():
+    """创建bot实例，根据配置决定是否启用privileged intents"""
+    global bot, intents, DISCORD_PY_VERSION
+
     try:
+        # 尝试discord.py 2.0+风格
         if intents_available:
             intents = discord.Intents.default()
             if ENABLE_PRIVILEGED_INTENTS:
-                intents.members = True
+                intents.members = True  # 只有在明确启用时才设置privileged intent
             else:
-                intents.members = False  # 默认禁用privileged intents
-            bot = ext_commands.Bot(command_prefix='!', intents=intents)
-            DISCORD_PY_VERSION = 1.5
+                intents.members = False
+            bot = discord.Bot(intents=intents)
+            DISCORD_PY_VERSION = 2
         else:
-            # 最老的版本
+            raise AttributeError("No Intents available")
+    except AttributeError:
+        # 回退到commands.Bot
+        try:
+            if intents_available:
+                intents = discord.Intents.default()
+                if ENABLE_PRIVILEGED_INTENTS:
+                    intents.members = True
+                else:
+                    intents.members = False  # 默认禁用privileged intents
+                bot = ext_commands.Bot(command_prefix='!', intents=intents)
+                DISCORD_PY_VERSION = 1.5
+            else:
+                # 最老的版本
+                bot = ext_commands.Bot(command_prefix='!')
+                DISCORD_PY_VERSION = 1
+        except TypeError:
+            # 如果还是失败，尝试最基本的版本
             bot = ext_commands.Bot(command_prefix='!')
+            intents = None
             DISCORD_PY_VERSION = 1
-    except TypeError:
-        # 如果还是失败，尝试最基本的版本
-        bot = ext_commands.Bot(command_prefix='!')
-        intents = None
-        DISCORD_PY_VERSION = 1
+
+# 先创建基本的bot（稍后会重新配置）
+create_bot()
 
 # 检查slash command支持
 HAS_SLASH_COMMANDS = hasattr(bot, 'slash_command')
@@ -220,6 +233,9 @@ TOKEN = CONFIG["token"]
 GUILD_ID = CONFIG["guild_id"]
 PAYMENT_PLATFORM = CONFIG.get("payment_platform", "epusdt")
 ENABLE_PRIVILEGED_INTENTS = CONFIG.get("enable_privileged_intents", False)
+
+# 使用配置重新创建bot
+create_bot()
 
 # 支付平台配置
 if PAYMENT_PLATFORM == "yipay":
