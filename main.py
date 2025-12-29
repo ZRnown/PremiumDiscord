@@ -3,23 +3,69 @@ from typing import Optional, Dict
 from datetime import datetime
 import discord
 from discord.ext import commands, tasks
+
 # 兼容不同版本的discord.py
 try:
-    from discord import Option
-except ImportError:
-    try:
-        from discord.app_commands import Option
-    except ImportError:
-        # 在某些版本中，Option可能不存在，创建一个兼容的类
-        class Option:
-            def __init__(self, type_hint, description="", **kwargs):
-                self.type_hint = type_hint
-                self.description = description
-                self.kwargs = kwargs
+    # discord.py 2.0+ 风格
+    intents = discord.Intents.default()
+    intents.members = True
+    bot = discord.Bot(intents=intents)
+    DISCORD_PY_VERSION = 2
+except AttributeError:
+    # discord.py 1.x 风格的fallback
+    from discord.ext import commands as ext_commands
+    bot = ext_commands.Bot(command_prefix='!')
+    intents = None  # 1.x版本不需要intents
+    DISCORD_PY_VERSION = 1
 
-            def __call__(self, func):
-                # 直接返回函数，不做任何修改
-                return func
+# 检查slash command支持
+HAS_SLASH_COMMANDS = hasattr(bot, 'slash_command')
+
+def slash_command(*args, **kwargs):
+    """兼容性装饰器：如果不支持slash command则跳过"""
+    def decorator(func):
+        if HAS_SLASH_COMMANDS:
+            return bot.slash_command(*args, **kwargs)(func)
+        else:
+            # 对于不支持的版本，创建一个占位符
+            print(f"⚠️  Skipping slash command '{kwargs.get('description', 'unknown')}' - not supported in this discord.py version")
+            return func
+    return decorator
+
+# UI组件兼容性处理
+try:
+    import discord.ui as ui
+    HAS_UI_COMPONENTS = True
+except ImportError:
+    HAS_UI_COMPONENTS = False
+    # 创建兼容性类
+    class MockUI:
+        class View:
+            def __init__(self, *args, **kwargs):
+                pass
+        class Select:
+            def __init__(self, *args, **kwargs):
+                pass
+    ui = MockUI()
+
+# SelectOption兼容性
+try:
+    SelectOption = discord.SelectOption
+except AttributeError:
+    # 创建兼容性类
+    class SelectOption:
+        def __init__(self, label, value, description=None, default=False):
+            self.label = label
+            self.value = value
+            self.description = description
+            self.default = default
+
+# 对于不支持slash command的环境，创建一个占位符
+class Option:
+    def __init__(self, *args, **kwargs):
+        pass
+    def __call__(self, func):
+        return func
 import sqlite3
 import aiohttp
 from aiohttp import web
@@ -404,9 +450,7 @@ async def start_web_server():
     print(f"🌍 Webhook Server running on 0.0.0.0:{WEBHOOK_PORT} path={notify_path}")
 
 # ================= Discord Bot 设置 =================
-intents = discord.Intents.default()
-intents.members = True # 必须开启，用于赋予身份组
-bot = discord.Bot(intents=intents)
+# Bot和intents已在导入部分兼容性处理
 
 # webhook server 控制
 web_runner: Optional[web.AppRunner] = None
@@ -414,7 +458,7 @@ web_site: Optional[web.TCPSite] = None
 
 # ================= UI 交互视图 =================
 
-class PaymentVerifyView(discord.ui.View):
+class PaymentVerifyView(ui.View):
     def __init__(self, trade_no, plan_info, user_id):
         super().__init__(timeout=None)
         self.trade_no = trade_no
@@ -424,7 +468,7 @@ class PaymentVerifyView(discord.ui.View):
     # 已弃用按钮，避免用户手动确认
     # 保留类以兼容旧代码，但不添加按钮
 
-class NetworkSelect(discord.ui.Select):
+class NetworkSelect(ui.Select):
     def __init__(self, view, plan_info=None):
         # plan_info: (id, name, price, role_id, duration) or None before plan chosen
         self.plan_info = plan_info
@@ -432,7 +476,7 @@ class NetworkSelect(discord.ui.Select):
         options = []
         for display_name, type_code in PAYMENT_METHODS.items():
             options.append(
-                discord.SelectOption(
+                SelectOption(
                     label=display_name,
                     value=type_code,
                     description=str(type_code)
@@ -457,7 +501,7 @@ class NetworkSelect(discord.ui.Select):
         await self.parent_view.generate_payment(interaction, network_name, type_code)
 
 
-class NetworkSelectView(discord.ui.View):
+class NetworkSelectView(ui.View):
     def __init__(self, plan_info):
         super().__init__(timeout=120)
         self.plan_info = plan_info # (id, name, price, role_id, duration)
@@ -488,7 +532,7 @@ class NetworkSelectView(discord.ui.View):
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
-class PlanSelect(discord.ui.Select):
+class PlanSelect(ui.Select):
     def __init__(self, view, plans):
         # plans: list of (id, name, price, role_id, duration)
         self.plan_map = {str(p[0]): p for p in plans}
@@ -504,7 +548,7 @@ class PlanSelect(discord.ui.Select):
             else:
                 suffix = f"{duration}个月"
             options.append(
-                discord.SelectOption(
+                SelectOption(
                     label=f"{name} ({price} USDT)",
                     value=str(plan_id),
                     description=f"时长: {suffix}"
@@ -538,7 +582,7 @@ class PlanSelect(discord.ui.Select):
         await interaction.response.edit_message(content=f"已选择套餐：**{plan[1]}**，请继续选择支付网络。", view=self.parent_view)
 
 
-class PlanAndNetworkView(discord.ui.View):
+class PlanAndNetworkView(ui.View):
     def __init__(self):
         super().__init__(timeout=None)
         self.selected_plan = None
@@ -549,7 +593,7 @@ class PlanAndNetworkView(discord.ui.View):
         plans = fetch_plans()
 
         if not plans:
-            disabled_select = discord.ui.Select(
+            disabled_select = ui.Select(
                 placeholder="暂无套餐，管理员请先配置 /set_plan",
                 options=[],
                 disabled=True,
@@ -597,7 +641,7 @@ class PlanAndNetworkView(discord.ui.View):
 
 # ================= 斜杠指令 (Admin) =================
 
-@bot.slash_command(guild_ids=[GUILD_ID], description="添加或更新会员套餐")
+@slash_command(guild_ids=[GUILD_ID], description="添加或更新会员套餐")
 @commands.has_permissions(administrator=True)
 async def set_plan(
     ctx, 
@@ -620,7 +664,7 @@ async def set_plan(
     conn.commit()
     await ctx.respond(f"✅ 已{action}套餐 **{name}**: {price} USDT -> {role.mention}", ephemeral=True)
 
-@bot.slash_command(guild_ids=[GUILD_ID], description="发送充值面板")
+@slash_command(guild_ids=[GUILD_ID], description="发送充值面板")
 @commands.has_permissions(administrator=True)
 async def send_panel(ctx):
     # 权限自检，避免 Missing Access
@@ -669,7 +713,7 @@ async def send_panel(ctx):
     view = PlanAndNetworkView()
     await ctx.send(embed=embed_main, view=view)
 
-@bot.slash_command(guild_ids=[GUILD_ID], description="删除套餐")
+@slash_command(guild_ids=[GUILD_ID], description="删除套餐")
 @commands.has_permissions(administrator=True)
 async def delete_plan(
     ctx,
@@ -684,7 +728,7 @@ async def delete_plan(
     else:
         await ctx.respond(f"❌ 未找到套餐 **{name}**", ephemeral=True)
 
-@bot.slash_command(guild_ids=[GUILD_ID], description="查看所有套餐")
+@slash_command(guild_ids=[GUILD_ID], description="查看所有套餐")
 @commands.has_permissions(administrator=True)
 async def list_plans(ctx):
     c.execute("SELECT name, price, duration_months FROM plans")
@@ -695,7 +739,7 @@ async def list_plans(ctx):
     else:
         await ctx.respond("❌ 暂无套餐配置", ephemeral=True)
 
-@bot.slash_command(guild_ids=[GUILD_ID], description="手动授予用户会员（管理员）")
+@slash_command(guild_ids=[GUILD_ID], description="手动授予用户会员（管理员）")
 @commands.has_permissions(administrator=True)
 async def grant_member(
     ctx,
@@ -736,7 +780,7 @@ async def grant_member(
     expire_text = "永久" if duration == -1 else f"{duration} 个月"
     await ctx.respond(f"✅ 已为 {user.mention} 授予 {role.mention}（{expire_text}）。", ephemeral=True)
 
-@bot.slash_command(guild_ids=[GUILD_ID], description="测试回调功能（模拟支付成功，无需真实支付）")
+@slash_command(guild_ids=[GUILD_ID], description="测试回调功能（模拟支付成功，无需真实支付）")
 @commands.has_permissions(administrator=True)
 async def test_callback(
     ctx,
@@ -809,7 +853,7 @@ async def test_callback(
     except Exception as e:
         await ctx.respond(f"❌ 测试回调时出错：{e}", ephemeral=True)
 
-@bot.slash_command(guild_ids=[GUILD_ID], description="查看订单记录")
+@slash_command(guild_ids=[GUILD_ID], description="查看订单记录")
 @commands.has_permissions(administrator=True)
 async def list_orders(
     ctx,
