@@ -389,6 +389,13 @@ class YiPay:
     @staticmethod
     async def _create_yipay_order(trade_no, name, money, type_code):
         """易支付订单创建"""
+        # 确保金额格式正确
+        formatted_money = round(float(money), 2)
+
+        # 检查金额是否超过限制
+        if formatted_money > 1000:
+            raise RuntimeError(f"支付金额 {formatted_money} CNY 超过平台限制1000元")
+
         payload = {
             "pid": YIPAY_PID,
             "type": type_code,
@@ -396,7 +403,7 @@ class YiPay:
             "notify_url": NOTIFY_URL,
             "return_url": RETURN_URL or "",
             "name": name[:127],  # 限制商品名称长度
-            "money": f"{float(money):.2f}",  # 保留两位小数
+            "money": f"{formatted_money:.2f}",  # 保留两位小数
             "clientip": "127.0.0.1",  # 默认IP
             "device": "pc",
             "param": "",
@@ -652,8 +659,11 @@ class PlanSelect(ui.Select):
             else:
                 suffix = f"{duration}个月"
 
+            # 确保价格格式化正确
+            formatted_price = f"{round(float(price), 2):g}"  # 移除不必要的.0
+
             # 确保label长度不超过100字符（Discord限制）
-            label = f"{name} ({price} {currency})"
+            label = f"{name} ({formatted_price} {currency})"
             if len(label) > 100:
                 label = label[:97] + "..."
 
