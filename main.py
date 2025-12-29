@@ -170,7 +170,7 @@ async def fulfill_order(trade_no: str):
     if not plan:
         print(f"[Webhook] 未找到订单对应套餐 {plan_id}")
         return
-    _, _, _, role_id, duration = plan
+    _, _, _, _, role_id, duration = plan
 
     guild = bot.get_guild(GUILD_ID)
     if not guild:
