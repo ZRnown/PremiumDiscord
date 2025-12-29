@@ -64,17 +64,32 @@ def create_bot():
 # 先创建基本的bot（稍后会重新配置）
 create_bot()
 
-# 检查slash command支持
-HAS_SLASH_COMMANDS = hasattr(bot, 'slash_command')
+# 强制要求Py-cord以支持slash commands
+try:
+    # 尝试使用Py-cord的语法
+    test_command = bot.slash_command(guild_ids=[123456789])  # 测试guild_ids
+    HAS_SLASH_COMMANDS = True
+    PY_CORD_MODE = True
+    print("✅ 检测到Py-cord，支持完整的slash commands和UI组件")
+except (AttributeError, TypeError):
+    # 不支持Py-cord，强制报错
+    HAS_SLASH_COMMANDS = False
+    PY_CORD_MODE = False
+    print("❌ 未检测到Py-cord！")
+    print("💡 Slash commands需要Py-cord库支持")
+    print("请运行以下命令安装Py-cord：")
+    print("pip uninstall discord.py -y")
+    print("pip install py-cord>=2.4.0")
+    print("然后重新运行: python3 main.py")
+    exit(1)  # 强制退出，要求用户安装Py-cord
 
 def slash_command(*args, **kwargs):
-    """兼容性装饰器：如果不支持slash command则跳过"""
+    """Py-cord slash command装饰器"""
     def decorator(func):
-        if HAS_SLASH_COMMANDS:
+        if PY_CORD_MODE and HAS_SLASH_COMMANDS:
             return bot.slash_command(*args, **kwargs)(func)
         else:
-            # 对于不支持的版本，创建一个占位符
-            print(f"⚠️  Skipping slash command '{kwargs.get('description', 'unknown')}' - not supported in this discord.py version")
+            print(f"❌ 无法注册slash command - 需要Py-cord支持")
             return func
     return decorator
 
@@ -106,12 +121,25 @@ except AttributeError:
             self.description = description
             self.default = default
 
-# 对于不支持slash command的环境，创建一个占位符
+# Option兼容类
 class Option:
-    def __init__(self, *args, **kwargs):
-        pass
+    def __init__(self, type_hint, description="", **kwargs):
+        self.type_hint = type_hint
+        self.description = description
+        self.kwargs = kwargs
+
     def __call__(self, func):
         return func
+
+    # 关键：使Option表现为原始类型
+    def __eq__(self, other):
+        return self.type_hint == other
+
+    def __hash__(self):
+        return hash(self.type_hint)
+
+    def __repr__(self):
+        return repr(self.type_hint)
 import sqlite3
 import aiohttp
 from aiohttp import web
@@ -942,11 +970,27 @@ async def list_orders(
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user}")
+
+    # 同步slash commands (仅在官方discord.py模式下需要)
+    if HAS_SLASH_COMMANDS and not PY_CORD_MODE:
+        try:
+            # 同步命令树到指定服务器
+            guild = discord.Object(id=GUILD_ID)
+            bot.tree.copy_global_to(guild=guild)
+            await bot.tree.sync(guild=guild)
+            print("✅ 已同步slash commands到服务器")
+        except Exception as e:
+            print(f"⚠️ 同步slash commands失败: {e}")
+
     # 重启后保持按钮监听状态
-    bot.add_view(PlanAndNetworkView())
+    if HAS_UI_COMPONENTS:
+        bot.add_view(PlanAndNetworkView())
+    else:
+        print("⚠️ UI组件不支持，跳过按钮注册")
+
     # 启动 webhook 服务器（用于接收 Epusdt 回调）
     await start_web_server()
-    
+
     # 启动定时任务检查到期订阅
     check_expired_subscriptions.start()
     # 启动时立即跑一次过期检查
@@ -983,152 +1027,6 @@ async def check_expired_subscriptions():
 @check_expired_subscriptions.before_loop
 async def before_check_expired():
     await bot.wait_until_ready()
-
-# ================= 传统文本命令 (兼容模式) =================
-
-@bot.command(name='添加套餐')
-async def add_plan_text(ctx, name: str, price: float, role: discord.Role):
-    """添加或更新会员套餐 (文本命令版本)"""
-    # 检查管理员权限
-    if not ctx.author.guild_permissions.administrator:
-        await ctx.send("❌ 你没有管理员权限！")
-        return
-
-    # 检查是否已存在同名套餐，存在则更新，不存在则插入
-    c.execute("SELECT id FROM plans WHERE name = ?", (name,))
-    data = c.fetchone()
-    if data:
-        c.execute("UPDATE plans SET price=?, role_id=?, duration_months=? WHERE name=?",
-                  (price, role.id, 1, name))  # 默认1个月
-        action = "更新"
-    else:
-        c.execute("INSERT INTO plans (name, price, role_id, duration_months) VALUES (?, ?, ?, ?)",
-                  (name, price, role.id, 1))
-        action = "添加"
-    conn.commit()
-    await ctx.send(f"✅ 已{action}套餐 **{name}**: {price} USDT -> {role.mention}")
-
-@bot.command(name='发送面板')
-async def send_panel_text(ctx):
-    """发送充值面板 (文本命令版本)"""
-    # 检查管理员权限
-    if not ctx.author.guild_permissions.administrator:
-        await ctx.send("❌ 你没有管理员权限！")
-        return
-
-    # 权限自检
-    channel = ctx.channel
-    me = ctx.guild.me
-    perms = channel.permissions_for(me)
-    if not (perms.send_messages and perms.embed_links and perms.view_channel):
-        await ctx.send("❌ 机器人在此频道缺少发送消息或嵌入权限，请管理员为机器人开启：发送消息、嵌入链接。")
-        return
-
-    # 构建主 Embed (价格表)
-    embed_main = discord.Embed(
-        title="LEVEL UP YOUR TRADING 🚀",
-        description="选择套餐 → 选择支付方式 → 支付 → 自动开通会员",
-        color=0xF6C344
-    )
-
-    # 动态从数据库读取价格显示在 Embed 中
-    c.execute("SELECT name, price, duration_months FROM plans")
-    plans = c.fetchall()
-    price_text = ""
-    for p in plans:
-        duration = p[2]
-        if duration == -1:
-            duration_str = "/永久"
-        elif duration == 1:
-            duration_str = "/月"
-        elif duration == 12:
-            duration_str = "/年"
-        else:
-            duration_str = f"/{duration}个月"
-
-        price_text += f"**{p[0]}**：{p[1]} USDT{duration_str}\n"
-
-    if not price_text:
-        price_text = "暂无套餐配置，请使用管理员指令配置。"
-
-    steps_text = "```\n✅ 选套餐 + 支付方式\n💳 点击前往支付\n🔗 完成支付\n🎉 自动开通会员\n```"
-
-    embed_main.add_field(name="💰 会员价格", value=price_text, inline=False)
-    embed_main.add_field(name="📌 开通步骤", value=steps_text, inline=False)
-    embed_main.set_thumbnail(url="https://cdn-icons-png.flaticon.com/512/3135/3135715.png")
-
-    # 先响应，再发送面板
-    await ctx.send("✅ 正在发送面板...", ephemeral=False)
-    view = PlanAndNetworkView()
-    await ctx.send(embed=embed_main, view=view)
-
-@bot.command(name='删除套餐')
-async def delete_plan_text(ctx, name: str):
-    """删除套餐 (文本命令版本)"""
-    # 检查管理员权限
-    if not ctx.author.guild_permissions.administrator:
-        await ctx.send("❌ 你没有管理员权限！")
-        return
-
-    c.execute("SELECT id FROM plans WHERE name = ?", (name,))
-    data = c.fetchone()
-    if data:
-        c.execute("DELETE FROM plans WHERE name = ?", (name,))
-        conn.commit()
-        await ctx.send(f"✅ 已删除套餐 **{name}**")
-    else:
-        await ctx.send(f"❌ 未找到套餐 **{name}**")
-
-@bot.command(name='查看套餐')
-async def list_plans_text(ctx):
-    """查看所有套餐 (文本命令版本)"""
-    # 检查管理员权限
-    if not ctx.author.guild_permissions.administrator:
-        await ctx.send("❌ 你没有管理员权限！")
-        return
-
-    c.execute("SELECT name, price, duration_months FROM plans")
-    plans = c.fetchall()
-    if plans:
-        plan_list = "\n".join([f"**{p[0]}**: {p[1]} USDT (时长: {p[2]}个月)" for p in plans])
-        await ctx.send(f"📋 **当前套餐列表：**\n{plan_list}")
-    else:
-        await ctx.send("❌ 暂无套餐配置")
-
-@bot.command(name='帮助')
-async def help_text(ctx):
-    """显示帮助信息"""
-    embed = discord.Embed(
-        title="🤖 Discord会员充值机器人",
-        description="支持支付宝、微信、QQ钱包、USDT等多种支付方式",
-        color=0xF6C344
-    )
-
-    embed.add_field(
-        name="💰 用户命令",
-        value="输入 `!发送面板` 查看充值选项",
-        inline=False
-    )
-
-    embed.add_field(
-        name="⚙️ 管理员命令",
-        value="""```
-!添加套餐 <名称> <价格> <@角色>
-!删除套餐 <名称>
-!查看套餐
-!帮助
-```""",
-        inline=False
-    )
-
-    embed.add_field(
-        name="📝 使用说明",
-        value="1. 使用 `!发送面板` 获取充值链接\n2. 选择套餐和支付方式\n3. 完成支付后自动开通会员",
-        inline=False
-    )
-
-    embed.set_footer(text="💡 如需slash commands，请升级discord.py到2.0+版本")
-    await ctx.send(embed=embed)
 
 if __name__ == "__main__":
     bot.run(TOKEN)
