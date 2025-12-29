@@ -479,12 +479,20 @@ async def handle_notify(request: web.Request):
         if not data:  # 如果POST为空，尝试GET
             data = dict(request.query)
 
+        print(f"[Webhook] 📨 收到回调请求: {request.method} {request.path}")
+        print(f"[Webhook] 📋 参数: {data}")
+
         if PAYMENT_PLATFORM == "yipay":
             # 易支付回调验证
             signature = data.get("sign")
             local_sign = YiPay.generate_sign_yipay(data, YIPAY_KEY)
+            print(f"[Webhook] 🔐 签名验证: 收到={signature}, 本地={local_sign}")
+
             if signature != local_sign:
+                print(f"[Webhook] ❌ 签名验证失败")
                 return web.Response(text="fail", status=403)
+
+            print(f"[Webhook] ✅ 签名验证成功")
 
             # trade_status == "TRADE_SUCCESS" 表示支付成功
             if data.get("trade_status") == "TRADE_SUCCESS":
@@ -492,7 +500,7 @@ async def handle_notify(request: web.Request):
                 if trade_no:
                     c.execute("UPDATE orders SET status = 'paid' WHERE order_id = ?", (trade_no,))
                     conn.commit()
-                    print(f"[Webhook] 易支付订单 {trade_no} 支付成功")
+                    print(f"[Webhook] 💰 易支付订单 {trade_no} 支付成功")
                     # 异步发放身份组
                     bot.loop.create_task(fulfill_order(trade_no))
             return web.Response(text="success")
@@ -533,6 +541,8 @@ async def start_web_server():
     notify_path = parsed.path or "/notify"
     if notify_path == "/":
         notify_path = "/notify"
+    # 易支付使用GET回调，彩虹易支付使用POST回调
+    app.router.add_get(notify_path, handle_notify)
     app.router.add_post(notify_path, handle_notify)
     web_runner = web.AppRunner(app)
     await web_runner.setup()
@@ -1089,6 +1099,13 @@ async def process_paid_order(
         await ctx.respond(f"✅ 已手动处理订单 `{order_id}`\n用户: {user_mention}\n状态: 已支付 → 已发放会员权限", ephemeral=True)
     except Exception as e:
         await ctx.respond(f"⚠️ 订单 `{order_id}` 已标记为已支付，但发放权限时出错: {e}", ephemeral=True)
+
+@slash_command(guild_ids=[GUILD_ID], description="查看订单记录")
+@commands.has_permissions(administrator=True)
+async def list_orders(
+    ctx,
+    status: str = None
+):
     """查看订单记录"""
     if status:
         c.execute("SELECT order_id, user_id, plan_id, status, created_at FROM orders WHERE status = ? ORDER BY created_at DESC LIMIT 20", (status,))
