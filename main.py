@@ -5,18 +5,46 @@ import discord
 from discord.ext import commands, tasks
 
 # 兼容不同版本的discord.py
+from discord.ext import commands as ext_commands
+
+# 动态检测需要的参数
+DISCORD_PY_VERSION = 1
+intents = None
+
 try:
-    # discord.py 2.0+ 风格
-    intents = discord.Intents.default()
-    intents.members = True
-    bot = discord.Bot(intents=intents)
-    DISCORD_PY_VERSION = 2
+    # 首先检查是否有Intents类
+    test_intents = discord.Intents.default()
+    intents_available = True
 except AttributeError:
-    # discord.py 1.x 风格的fallback
-    from discord.ext import commands as ext_commands
-    bot = ext_commands.Bot(command_prefix='!')
-    intents = None  # 1.x版本不需要intents
-    DISCORD_PY_VERSION = 1
+    intents_available = False
+
+try:
+    # 尝试discord.py 2.0+风格
+    if intents_available:
+        intents = discord.Intents.default()
+        intents.members = True
+        bot = discord.Bot(intents=intents)
+        DISCORD_PY_VERSION = 2
+    else:
+        raise AttributeError("No Intents available")
+except AttributeError:
+    # 回退到commands.Bot
+    try:
+        if intents_available:
+            # 一些版本的commands.Bot需要intents
+            intents = discord.Intents.default()
+            intents.members = True
+            bot = ext_commands.Bot(command_prefix='!', intents=intents)
+            DISCORD_PY_VERSION = 1.5
+        else:
+            # 最老的版本
+            bot = ext_commands.Bot(command_prefix='!')
+            DISCORD_PY_VERSION = 1
+    except TypeError:
+        # 如果还是失败，尝试最基本的版本
+        bot = ext_commands.Bot(command_prefix='!')
+        intents = None
+        DISCORD_PY_VERSION = 1
 
 # 检查slash command支持
 HAS_SLASH_COMMANDS = hasattr(bot, 'slash_command')
