@@ -3,7 +3,7 @@ from typing import Optional, Dict
 from datetime import datetime
 import discord
 from discord.ext import commands, tasks
-from discord.commands import Option
+from discord import Option
 import sqlite3
 import aiohttp
 from aiohttp import web
