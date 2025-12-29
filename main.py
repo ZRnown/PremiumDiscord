@@ -3,7 +3,23 @@ from typing import Optional, Dict
 from datetime import datetime
 import discord
 from discord.ext import commands, tasks
-from discord import Option
+# 兼容不同版本的discord.py
+try:
+    from discord import Option
+except ImportError:
+    try:
+        from discord.app_commands import Option
+    except ImportError:
+        # 在某些版本中，Option可能不存在，创建一个兼容的类
+        class Option:
+            def __init__(self, type_hint, description="", **kwargs):
+                self.type_hint = type_hint
+                self.description = description
+                self.kwargs = kwargs
+
+            def __call__(self, func):
+                # 直接返回函数，不做任何修改
+                return func
 import sqlite3
 import aiohttp
 from aiohttp import web
