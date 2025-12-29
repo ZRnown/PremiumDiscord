@@ -1,13 +1,16 @@
 {
   "token": "YOUR_DISCORD_BOT_TOKEN",
   "guild_id": 123456789012345678,
-  "epusdt_url": "https://your-epusdt-domain.com/",
-  "epusdt_token": "YOUR_EPUSDT_SIGN_TOKEN",
+  "payment_platform": "yipay",
+  "yipay_url": "https://ezfp.cn/",
+  "yipay_pid": "YOUR_YIPAY_MERCHANT_ID",
+  "yipay_key": "YOUR_YIPAY_MERCHANT_KEY",
   "payment_methods": {
-    "USDT-BSC": "bsc",
-    "USDT-TRC20": "trc20"
+    "支付宝": "alipay",
+    "微信支付": "wxpay",
+    "QQ钱包": "qqpay",
+    "USDT": "usdt"
   },
-  "usdt_to_cny_rate": 7.0,
   "notify_url": "http://localhost/notify",
   "return_url": "http://localhost/return",
   "database": "bot_data.db"

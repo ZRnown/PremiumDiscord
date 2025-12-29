@@ -15,7 +15,7 @@
 
 - Python 3.8 或更高版本
 - Discord Bot Token（从 [Discord Developer Portal](https://discord.com/developers/applications) 获取）
-- 彩虹易支付商户账号（商户 ID 和密钥）
+- 支付平台商户账号（支持易支付或彩虹易支付）
 - Discord 服务器管理员权限
 
 ## 安装步骤
@@ -35,13 +35,21 @@ pip install -r requirements.txt
 2. 编辑 `config.json`，填入你的实际值：
    - `token`: Discord Bot Token
    - `guild_id`: 服务器 ID
-   - `yipay_url`: 易支付域名（以 `/` 结尾）
-   - `yipay_pid` / `yipay_key`: 商户 ID 与密钥
-   - `payment_types`: 支付通道映射，例如：
+   - `payment_platform`: 支付平台类型（"yipay" 表示易支付，"epusdt" 表示彩虹易支付）
+   - **易支付配置**（当 payment_platform 为 "yipay" 时）：
+     - `yipay_url`: 易支付域名（支持自定义，如 "https://feedapp.top/"）
+     - `yipay_pid`: 易支付商户ID
+     - `yipay_key`: 易支付商户密钥
+   - **彩虹易支付配置**（当 payment_platform 为 "epusdt" 时）：
+     - `epusdt_url`: 彩虹易支付域名
+     - `epusdt_token`: 彩虹易支付签名令牌
+   - `payment_methods`: 支付通道映射，例如：
      ```json
      {
-       "USDT-TRC20": "usdt_trc20",
-       "USDT-BEP20": "usdt_bep20"
+       "支付宝": "alipay",
+       "微信支付": "wxpay",
+       "QQ钱包": "qqpay",
+       "USDT": "usdt"
      }
      ```
    - 可选项：`notify_url`、`return_url`、`database`（数据库文件名）
@@ -71,6 +79,20 @@ https://discord.com/api/oauth2/authorize?client_id=YOUR_CLIENT_ID&permissions=26
 3. 在服务器设置 > 角色中，将机器人角色拖到会员角色上方
 
 ## 使用方法
+
+### 🚀 快速开始
+
+1. **配置检查**: 机器人已配置为使用聚合支付平台 (https://feedapp.top/)
+2. **启动机器人**: `python main.py`
+3. **发送支付面板**: 使用 `/send_panel` 指令在Discord频道中创建支付界面
+4. **测试支付**: 用户可以选择支付宝测试支付（0.01元测试订单已验证成功）
+
+### 📊 API测试结果
+
+- ✅ 商户信息查询：成功
+- ✅ 订单创建：成功（支付宝二维码生成正常）
+- ✅ 签名验证：MD5算法工作正常
+- ✅ 网络连接：API响应正常
 
 ### 管理员指令
 
@@ -125,20 +147,43 @@ https://discord.com/api/oauth2/authorize?client_id=YOUR_CLIENT_ID&permissions=26
 - **orders**: 存储订单记录
 - **subscriptions**: 存储用户订阅信息（用于到期管理）
 
-## 易支付配置说明
+## 支付平台配置说明
 
-### 支付通道类型
+### 支持的支付平台
 
-不同易支付系统的支付通道代码可能不同，常见格式：
+机器人支持两种主流支付平台：
 
-- 数字 ID：`"1001"`, `"1002"`
-- 字符串代码：`"usdt_trc20"`, `"trc20"`, `"usdt"`
+#### 1. 聚合支付平台 (YiPay)
+- **平台地址**: https://feedapp.top/
+- **商户ID**: 1000 (已配置)
+- **支付方式**: 支付宝、微信支付、QQ钱包
+- **签名方式**: MD5 + RSA兼容模式
+- **API文档**: https://feedapp.top/
 
-请在易支付后台查看具体的通道代码，并修改 `PAYMENT_TYPES` 字典。
+#### 2. 彩虹易支付 (Epusdt)
+- **商户注册**: 访问彩虹易支付官网注册账号
+- **主要特点**: 专注于USDT支付
+- **API特点**: 支持USDT转CNY汇率转换
 
-### API 路径
+### 易支付通道配置
 
-如果易支付的 API 路径不是 `/api.php`，请修改 `YiPay.check_order_status()` 方法中的路径。
+易支付的支付通道代码固定如下：
+
+- `alipay`: 支付宝
+- `wxpay`: 微信支付
+- `qqpay`: QQ钱包
+- `bank`: 网银支付
+- `jdpay`: 京东支付
+- `paypal`: PayPal
+- `usdt`: USDT
+
+### 彩虹易支付通道配置
+
+彩虹易支付支持的通道：
+
+- `trc20`: USDT-TRC20
+- `bsc`: USDT-BEP20
+- 其他自定义通道代码
 
 ## 定时任务
 

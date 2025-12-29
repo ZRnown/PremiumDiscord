@@ -77,22 +77,44 @@ def load_config(path: Optional[str] = None) -> dict:
     with open(config_path, "r", encoding="utf-8") as f:
         config = json.load(f)
 
-    required_keys = [
-        "token",
-        "guild_id",
-        "epusdt_url",
-        "epusdt_token",
-        "payment_methods"
-    ]
+    # 根据支付平台确定必填字段
+    payment_platform = config.get("payment_platform", "epusdt")
+
+    if payment_platform == "yipay":
+        required_keys = [
+            "token",
+            "guild_id",
+            "yipay_url",
+            "yipay_pid",
+            "yipay_key",
+            "payment_methods"
+        ]
+    elif payment_platform == "epusdt":
+        required_keys = [
+            "token",
+            "guild_id",
+            "epusdt_url",
+            "epusdt_token",
+            "payment_methods"
+        ]
+    else:
+        raise ValueError(f"不支持的支付平台: {payment_platform}")
+
     missing = [k for k in required_keys if k not in config]
     if missing:
         raise ValueError(f"配置文件缺少必填字段: {', '.join(missing)}")
 
     # 标准化 URL，确保以 / 结尾
-    epusdt_url = config.get("epusdt_url", "")
-    if not epusdt_url.endswith("/"):
-        epusdt_url = epusdt_url + "/"
-    config["epusdt_url"] = epusdt_url
+    if payment_platform == "yipay":
+        yipay_url = config.get("yipay_url", "")
+        if not yipay_url.endswith("/"):
+            yipay_url = yipay_url + "/"
+        config["yipay_url"] = yipay_url
+    elif payment_platform == "epusdt":
+        epusdt_url = config.get("epusdt_url", "")
+        if not epusdt_url.endswith("/"):
+            epusdt_url = epusdt_url + "/"
+        config["epusdt_url"] = epusdt_url
 
     return config
 
@@ -101,10 +123,16 @@ CONFIG = load_config()
 
 TOKEN = CONFIG["token"]
 GUILD_ID = CONFIG["guild_id"]
+PAYMENT_PLATFORM = CONFIG.get("payment_platform", "epusdt")
 
-# Epusdt 配置
-EPUSDT_URL = CONFIG["epusdt_url"]
-EPUSDT_TOKEN = CONFIG["epusdt_token"]
+# 支付平台配置
+if PAYMENT_PLATFORM == "yipay":
+    YIPAY_URL = CONFIG["yipay_url"]
+    YIPAY_PID = CONFIG["yipay_pid"]
+    YIPAY_KEY = CONFIG["yipay_key"]
+elif PAYMENT_PLATFORM == "epusdt":
+    EPUSDT_URL = CONFIG["epusdt_url"]
+    EPUSDT_TOKEN = CONFIG["epusdt_token"]
 
 # 支付方式映射（显示名 -> 通道代码）
 PAYMENT_METHODS: Dict[str, str] = CONFIG["payment_methods"]
@@ -171,17 +199,33 @@ c.execute('''CREATE TABLE IF NOT EXISTS subscriptions
 
 conn.commit()
 
-# ================= 易支付工具类 =================
+# ================= 支付工具类 =================
 class YiPay:
     @staticmethod
+    def generate_sign_yipay(params: Dict[str, str], key: str) -> str:
+        """易支付MD5签名算法"""
+        # 1. 将所有参数按照参数名ASCII码从小到大排序（a-z）
+        # 2. 忽略空值与sign、sign_type
+        # 3. 拼接成URL键值对的格式 a=b&c=d&e=f
+        # 4. 最后拼接上商户密钥KEY
+        # 5. MD5加密后转小写
+        items = []
+        for k in sorted(params.keys()):
+            val = str(params[k]) if params[k] is not None else ""
+            if val == "" or k in ["sign", "sign_type"]:
+                continue
+            items.append(f"{k}={val}")
+        sign_str = "&".join(items) + key
+        return hashlib.md5(sign_str.encode("utf-8")).hexdigest()
+
+    @staticmethod
     def generate_sign_epusdt(params: Dict[str, str], token: str) -> str:
-        # Epusdt: ASCII 排序，忽略空值与 signature，拼接后追加 token，再 md5 小写
+        """彩虹易支付MD5签名算法（保留兼容性）"""
         items = []
         for k in sorted(params.keys()):
             val = params[k]
             if val == "" or val is None or k == "signature":
                 continue
-            # 若是浮点且为整数，转为 int，避免 "39.0" 与 "39" 不一致
             if isinstance(val, float) and val.is_integer():
                 val = int(val)
             items.append(f"{k}={val}")
@@ -190,12 +234,58 @@ class YiPay:
 
     @staticmethod
     async def create_order(trade_no, name, money, type_code):
-        # money 是 USDT 价格，需要转换为 CNY
-        # Epusdt API 的 amount 参数要求 CNY（人民币）金额
+        """创建支付订单"""
+        if PAYMENT_PLATFORM == "yipay":
+            return await YiPay._create_yipay_order(trade_no, name, money, type_code)
+        elif PAYMENT_PLATFORM == "epusdt":
+            return await YiPay._create_epusdt_order(trade_no, name, money, type_code)
+        else:
+            raise RuntimeError(f"不支持的支付平台: {PAYMENT_PLATFORM}")
+
+    @staticmethod
+    async def _create_yipay_order(trade_no, name, money, type_code):
+        """易支付订单创建"""
+        payload = {
+            "pid": YIPAY_PID,
+            "type": type_code,
+            "out_trade_no": trade_no,
+            "notify_url": NOTIFY_URL,
+            "return_url": RETURN_URL or "",
+            "name": name[:127],  # 限制商品名称长度
+            "money": f"{float(money):.2f}",  # 保留两位小数
+            "clientip": "127.0.0.1",  # 默认IP
+            "device": "pc",
+            "param": "",
+            "sign_type": "MD5"
+        }
+
+        # 生成签名
+        payload["sign"] = YiPay.generate_sign_yipay(payload, YIPAY_KEY)
+
+        # 调用易支付API
+        api_url = urllib.parse.urljoin(YIPAY_URL, "mapi.php")
+        async with aiohttp.ClientSession() as session:
+            async with session.post(api_url, data=payload, timeout=15) as resp:
+                data = await resp.json(content_type=None)
+                if data.get("code") != 1:
+                    raise RuntimeError(f"易支付下单失败: {data}")
+
+                # 返回支付链接
+                if "payurl" in data:
+                    return data["payurl"]
+                elif "qrcode" in data:
+                    return data["qrcode"]
+                elif "urlscheme" in data:
+                    return data["urlscheme"]
+                else:
+                    raise RuntimeError(f"易支付未返回支付链接: {data}")
+
+    @staticmethod
+    async def _create_epusdt_order(trade_no, name, money, type_code):
+        """彩虹易支付订单创建（保留兼容性）"""
         usdt_price = float(money)
-        cny_price = round(usdt_price * USDT_TO_CNY_RATE, 2)  # 转换为人民币，保留2位小数
-        
-        # 如果转换后是整数，转为 int（避免 280.0 vs 280 的签名问题）
+        cny_price = round(usdt_price * USDT_TO_CNY_RATE, 2)
+
         if cny_price.is_integer():
             amount_val = int(cny_price)
         else:
@@ -216,7 +306,7 @@ class YiPay:
             async with session.post(api_url, json=payload, timeout=15) as resp:
                 data = await resp.json(content_type=None)
                 if data.get("status_code") != 200 or "data" not in data:
-                    raise RuntimeError(f"Epusdt 下单失败: {data} | payload={payload}")
+                    raise RuntimeError(f"Epusdt 下单失败: {data}")
                 payment_url = data["data"].get("payment_url")
                 if not payment_url:
                     raise RuntimeError(f"Epusdt 未返回支付链接: {data}")
@@ -224,29 +314,58 @@ class YiPay:
 
     @staticmethod
     async def check_order_status(trade_no):
-        # Epusdt 无查询接口，采用“用户点击已支付”直接确认模式
+        """检查订单状态（用于兼容性）"""
         return True
 
 
 # ================= Webhook 监听（异步回调） =================
 async def handle_notify(request: web.Request):
     try:
-        data = await request.json()
-        signature = data.get("signature")
-        local_sign = YiPay.generate_sign_epusdt(data, EPUSDT_TOKEN)
-        if signature != local_sign:
-            return web.Response(text="fail", status=403)
+        # 获取请求参数（易支付使用GET方式回调）
+        data = dict(await request.post())  # 获取POST数据
+        if not data:  # 如果POST为空，尝试GET
+            data = dict(request.query)
 
-        # status == 2 表示支付成功
-        if str(data.get("status")) == "2":
-            trade_no = data.get("order_id")
-            if trade_no:
-                c.execute("UPDATE orders SET status = 'paid' WHERE order_id = ?", (trade_no,))
-                conn.commit()
-                print(f"[Webhook] 订单 {trade_no} 支付成功")
-                # 异步发放身份组
-                bot.loop.create_task(fulfill_order(trade_no))
-        return web.Response(text="ok")
+        if PAYMENT_PLATFORM == "yipay":
+            # 易支付回调验证
+            signature = data.get("sign")
+            local_sign = YiPay.generate_sign_yipay(data, YIPAY_KEY)
+            if signature != local_sign:
+                return web.Response(text="fail", status=403)
+
+            # trade_status == "TRADE_SUCCESS" 表示支付成功
+            if data.get("trade_status") == "TRADE_SUCCESS":
+                trade_no = data.get("out_trade_no")  # 商户订单号
+                if trade_no:
+                    c.execute("UPDATE orders SET status = 'paid' WHERE order_id = ?", (trade_no,))
+                    conn.commit()
+                    print(f"[Webhook] 易支付订单 {trade_no} 支付成功")
+                    # 异步发放身份组
+                    bot.loop.create_task(fulfill_order(trade_no))
+            return web.Response(text="success")
+
+        elif PAYMENT_PLATFORM == "epusdt":
+            # 彩虹易支付回调验证（保留兼容性）
+            data = await request.json()
+            signature = data.get("signature")
+            local_sign = YiPay.generate_sign_epusdt(data, EPUSDT_TOKEN)
+            if signature != local_sign:
+                return web.Response(text="fail", status=403)
+
+            # status == 2 表示支付成功
+            if str(data.get("status")) == "2":
+                trade_no = data.get("order_id")
+                if trade_no:
+                    c.execute("UPDATE orders SET status = 'paid' WHERE order_id = ?", (trade_no,))
+                    conn.commit()
+                    print(f"[Webhook] Epusdt订单 {trade_no} 支付成功")
+                    # 异步发放身份组
+                    bot.loop.create_task(fulfill_order(trade_no))
+            return web.Response(text="ok")
+
+        else:
+            return web.Response(text="unsupported platform", status=400)
+
     except Exception as e:
         print(f"[Webhook] Error: {e}")
         return web.Response(text="error", status=500)
