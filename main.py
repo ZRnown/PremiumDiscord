@@ -820,6 +820,7 @@ async def set_plan(
     # 使用配置文件中的默认货币单位
     currency = DEFAULT_CURRENCY
     print(f"调试: set_plan - 名称:{name}, 价格:{price}, 货币:{currency}, 时长:{duration}")
+    print(f"调试: 数据库路径: {DB_PATH}")
 
     # 检查价格是否合理
     if currency == 'CNY' and price > 1000:
@@ -843,6 +844,14 @@ async def set_plan(
         action = "添加"
     conn.commit()
 
+    # 验证数据是否正确保存
+    c.execute("SELECT id, name, price, currency, duration_months FROM plans WHERE name = ?", (name,))
+    saved_data = c.fetchone()
+    if saved_data:
+        print(f"调试: 数据验证成功 - 保存的数据: {saved_data}")
+    else:
+        print(f"调试: 数据验证失败 - 没有找到保存的数据")
+
     print(f"调试: {action}套餐成功 - {name}: {price} {currency}")
     await ctx.respond(f"✅ 已{action}套餐 **{name}**: {price} {currency.upper()} -> {role.mention}", ephemeral=True)
 
@@ -865,11 +874,11 @@ async def send_panel(ctx):
     )
     
     # 动态从数据库读取价格显示在 Embed 中
-    c.execute("SELECT name, price, currency, duration_months FROM plans")
+    c.execute("SELECT id, name, price, currency, role_id, duration_months FROM plans")
     plans = c.fetchall()
     price_text = ""
     for p in plans:
-        duration = p[3]
+        _, name, price, currency, _, duration = p
         if duration == -1:
             duration_str = "/永久"
         elif duration == 1:
@@ -878,8 +887,9 @@ async def send_panel(ctx):
             duration_str = "/年"
         else:
             duration_str = f"/{duration}个月"
-            
-        price_text += f"**{p[0]}**：{p[1]} {p[2]}{duration_str}\n"
+
+        formatted_price = f"{round(float(price), 2):g}"
+        price_text += f"**{name}**：{formatted_price} {currency}{duration_str}\n"
     
     if not price_text:
         price_text = "暂无套餐配置，请使用管理员指令配置。"
