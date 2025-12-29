@@ -306,8 +306,9 @@ c.execute('''CREATE TABLE IF NOT EXISTS plans
              (id INTEGER PRIMARY KEY AUTOINCREMENT,
               name TEXT,
               price REAL,
+              currency TEXT DEFAULT 'USDT',
               role_id INTEGER,
-              duration_months INTEGER)''') # duration_months: -1 代表永久
+              duration_months INTEGER)''') # duration_months: -1 代表永久, currency: 'USDT' 或 'CNY'
 
 # 创建订单表
 c.execute('''CREATE TABLE IF NOT EXISTS orders
@@ -327,6 +328,19 @@ c.execute('''CREATE TABLE IF NOT EXISTS subscriptions
               created_at INTEGER)''') # expire_date: -1 代表永久
 
 conn.commit()
+
+# 数据库迁移：为plans表添加currency字段
+try:
+    # 检查currency字段是否存在
+    c.execute("PRAGMA table_info(plans)")
+    columns = [column[1] for column in c.fetchall()]
+    if 'currency' not in columns:
+        print("🔄 正在为plans表添加currency字段...")
+        c.execute("ALTER TABLE plans ADD COLUMN currency TEXT DEFAULT 'USDT'")
+        conn.commit()
+        print("✅ 数据库迁移完成")
+except Exception as e:
+    print(f"⚠️ 数据库迁移检查失败: {e}")
 
 # ================= 支付工具类 =================
 class YiPay:
@@ -580,29 +594,39 @@ class NetworkSelectView(ui.View):
 
     async def generate_payment(self, interaction, network_name, type_code):
         user_id = interaction.user.id
-        plan_name = self.plan_info[1]
-        price = self.plan_info[2]
-        
+        plan_id, plan_name, price, currency, _, _ = self.plan_info
+
         # 生成订单号
         trade_no = build_trade_no(user_id)
-        
+
         # 存入数据库
         c.execute("INSERT INTO orders VALUES (?, ?, ?, ?, ?)",
-                  (trade_no, user_id, self.plan_info[0], 'pending', int(time.time())))
+                  (trade_no, user_id, plan_id, 'pending', int(time.time())))
         conn.commit()
 
-        # 根据支付方式决定传递给支付平台的金额
-        if type_code in ['alipay', 'wxpay', 'qqpay']:
-            # 人民币支付：转换USDT到CNY
-            payment_amount = round(price * USDT_TO_CNY_RATE, 2)
-        else:
-            # USDT支付：直接使用USDT金额
+        # 根据套餐货币单位和支付方式决定传递给支付平台的金额
+        if currency == 'CNY':
+            # 套餐是CNY定价，直接使用价格
             payment_amount = price
+            display_currency = "CNY"
+            display_price = price
+        else:  # USDT
+            # 套餐是USDT定价，需要根据支付方式转换
+            if type_code in ['alipay', 'wxpay', 'qqpay']:
+                # 人民币支付：转换USDT到CNY
+                payment_amount = round(price * USDT_TO_CNY_RATE, 2)
+                display_currency = "CNY"
+                display_price = payment_amount
+            else:
+                # USDT支付：直接使用USDT金额
+                payment_amount = price
+                display_currency = "USDT"
+                display_price = price
 
         # 获取支付链接
         pay_url = await YiPay.create_order(trade_no, f"Plan-{plan_name}", payment_amount, type_code)
         
-        embed = discord.Embed(title="💳 订单已创建", description=f"请点击下方链接支付 **{price} USDT**", color=0xF6C344)
+        embed = discord.Embed(title="💳 订单已创建", description=f"请点击下方链接支付 **{display_price} {display_currency}**", color=0xF6C344)
         embed.add_field(name="套餐", value=plan_name, inline=True)
         embed.add_field(name="网络", value=network_name, inline=True)
         embed.add_field(name="🔗 支付链接", value=f"[👉 点击前往支付]({pay_url})", inline=False)
@@ -613,11 +637,11 @@ class NetworkSelectView(ui.View):
 
 class PlanSelect(ui.Select):
     def __init__(self, view, plans):
-        # plans: list of (id, name, price, role_id, duration)
+        # plans: list of (id, name, price, currency, role_id, duration)
         self.plan_map = {str(p[0]): p for p in plans}
         options = []
         for p in plans[:25]:  # 限制最多25个选项
-            plan_id, name, price, _, duration = p
+            plan_id, name, price, currency, _, duration = p
             if duration == -1:
                 suffix = "永久"
             elif duration == 1:
@@ -628,7 +652,7 @@ class PlanSelect(ui.Select):
                 suffix = f"{duration}个月"
 
             # 确保label长度不超过100字符（Discord限制）
-            label = f"{name} ({price} USDT)"
+            label = f"{name} ({price} {currency})"
             if len(label) > 100:
                 label = label[:97] + "..."
 
@@ -719,39 +743,39 @@ class PlanAndNetworkView(ui.View):
             await interaction.response.send_message("请先选择套餐。", ephemeral=True)
             return
         user_id = interaction.user.id
-        plan_name = self.selected_plan[1]
-        price = self.selected_plan[2]
-        
+        plan_id, plan_name, price, currency, _, _ = self.selected_plan
+
         # 生成订单号
         trade_no = build_trade_no(user_id)
-        
+
         # 存入数据库
         c.execute("INSERT INTO orders VALUES (?, ?, ?, ?, ?)",
-                  (trade_no, user_id, self.selected_plan[0], 'pending', int(time.time())))
+                  (trade_no, user_id, plan_id, 'pending', int(time.time())))
         conn.commit()
 
-        # 根据支付方式决定传递给支付平台的金额
-        if type_code in ['alipay', 'wxpay', 'qqpay']:
-            # 人民币支付：转换USDT到CNY
-            payment_amount = round(price * USDT_TO_CNY_RATE, 2)
-        else:
-            # USDT支付：直接使用USDT金额
+        # 根据套餐货币单位和支付方式决定传递给支付平台的金额
+        if currency == 'CNY':
+            # 套餐是CNY定价，直接使用价格
             payment_amount = price
+            display_currency = "CNY"
+            display_price = price
+        else:  # USDT
+            # 套餐是USDT定价，需要根据支付方式转换
+            if type_code in ['alipay', 'wxpay', 'qqpay']:
+                # 人民币支付：转换USDT到CNY
+                payment_amount = round(price * USDT_TO_CNY_RATE, 2)
+                display_currency = "CNY"
+                display_price = payment_amount
+            else:
+                # USDT支付：直接使用USDT金额
+                payment_amount = price
+                display_currency = "USDT"
+                display_price = price
 
         # 获取支付链接
         pay_url = await YiPay.create_order(trade_no, f"Plan-{plan_name}", payment_amount, type_code)
 
-        # 根据支付方式决定显示的货币单位
-        currency_unit = "USDT"
-        if type_code in ['alipay', 'wxpay', 'qqpay']:
-            currency_unit = "CNY"
-            # 对于CNY支付，显示转换后的价格
-            cny_price = round(price * USDT_TO_CNY_RATE, 2)
-            display_price = cny_price
-        else:
-            display_price = price
-
-        embed = discord.Embed(title="💳 订单已创建", description=f"请点击下方链接支付 **{display_price} {currency_unit}**", color=0xF6C344)
+        embed = discord.Embed(title="💳 订单已创建", description=f"请点击下方链接支付 **{display_price} {display_currency}**", color=0xF6C344)
         embed.add_field(name="套餐", value=plan_name, inline=True)
         embed.add_field(name="支付方式", value=network_name, inline=True)
         embed.add_field(name="🔗 支付链接", value=f"[👉 点击前往支付]({pay_url})", inline=False)
@@ -767,22 +791,28 @@ async def set_plan(
     ctx,
     name: str,
     price: float,
+    currency: str,
     role: discord.Role,
     duration: int
 ):
+    # 验证currency参数
+    if currency.upper() not in ['USDT', 'CNY']:
+        await ctx.respond("❌ 货币单位必须是 'USDT' 或 'CNY'", ephemeral=True)
+        return
+
     # 检查是否已存在同名套餐，存在则更新，不存在则插入
     c.execute("SELECT id FROM plans WHERE name = ?", (name,))
     data = c.fetchone()
     if data:
-        c.execute("UPDATE plans SET price=?, role_id=?, duration_months=? WHERE name=?", 
-                  (price, role.id, duration, name))
+        c.execute("UPDATE plans SET price=?, currency=?, role_id=?, duration_months=? WHERE name=?",
+                  (price, currency.upper(), role.id, duration, name))
         action = "更新"
     else:
-        c.execute("INSERT INTO plans (name, price, role_id, duration_months) VALUES (?, ?, ?, ?)",
-                  (name, price, role.id, duration))
+        c.execute("INSERT INTO plans (name, price, currency, role_id, duration_months) VALUES (?, ?, ?, ?, ?)",
+                  (name, price, currency.upper(), role.id, duration))
         action = "添加"
     conn.commit()
-    await ctx.respond(f"✅ 已{action}套餐 **{name}**: {price} USDT -> {role.mention}", ephemeral=True)
+    await ctx.respond(f"✅ 已{action}套餐 **{name}**: {price} {currency.upper()} -> {role.mention}", ephemeral=True)
 
 @slash_command(guild_ids=[GUILD_ID], description="发送充值面板")
 @commands.has_permissions(administrator=True)
@@ -803,11 +833,11 @@ async def send_panel(ctx):
     )
     
     # 动态从数据库读取价格显示在 Embed 中
-    c.execute("SELECT name, price, duration_months FROM plans")
+    c.execute("SELECT name, price, currency, duration_months FROM plans")
     plans = c.fetchall()
     price_text = ""
     for p in plans:
-        duration = p[2]
+        duration = p[3]
         if duration == -1:
             duration_str = "/永久"
         elif duration == 1:
@@ -817,7 +847,7 @@ async def send_panel(ctx):
         else:
             duration_str = f"/{duration}个月"
             
-        price_text += f"**{p[0]}**：{p[1]} USDT{duration_str}\n"
+        price_text += f"**{p[0]}**：{p[1]} {p[2]}{duration_str}\n"
     
     if not price_text:
         price_text = "暂无套餐配置，请使用管理员指令配置。"
@@ -850,10 +880,10 @@ async def delete_plan(
 @slash_command(guild_ids=[GUILD_ID], description="查看所有套餐")
 @commands.has_permissions(administrator=True)
 async def list_plans(ctx):
-    c.execute("SELECT name, price, duration_months FROM plans")
+    c.execute("SELECT name, price, currency, duration_months FROM plans")
     plans = c.fetchall()
     if plans:
-        plan_list = "\n".join([f"**{p[0]}**: {p[1]} USDT (时长: {p[2]}个月)" for p in plans])
+        plan_list = "\n".join([f"**{p[0]}**: {p[1]} {p[2]} (时长: {p[3]}个月)" for p in plans])
         await ctx.respond(f"📋 **当前套餐列表：**\n{plan_list}", ephemeral=True)
     else:
         await ctx.respond("❌ 暂无套餐配置", ephemeral=True)
@@ -972,12 +1002,49 @@ async def test_callback(
     except Exception as e:
         await ctx.respond(f"❌ 测试回调时出错：{e}", ephemeral=True)
 
-@slash_command(guild_ids=[GUILD_ID], description="查看订单记录")
+@slash_command(guild_ids=[GUILD_ID], description="手动处理已支付订单")
 @commands.has_permissions(administrator=True)
-async def list_orders(
+async def process_paid_order(
     ctx,
-    status: str = None
+    order_id: str
 ):
+    """手动处理后台补单的情况，将订单标记为已支付并发放会员权限"""
+    # 检查订单是否存在
+    c.execute("SELECT user_id, plan_id, status FROM orders WHERE order_id = ?", (order_id,))
+    order = c.fetchone()
+
+    if not order:
+        # 如果订单不存在，尝试查找相似的订单号
+        c.execute("SELECT order_id, user_id, plan_id, status FROM orders WHERE order_id LIKE ? LIMIT 5", (f'%{order_id}%',))
+        similar_orders = c.fetchall()
+
+        if similar_orders:
+            order_list = "\n".join([f"`{o[0]}` - 用户:{o[1]} - 状态:{o[3]}" for o in similar_orders])
+            await ctx.respond(f"❌ 未找到订单 `{order_id}`，但找到相似订单：\n{order_list}", ephemeral=True)
+        else:
+            await ctx.respond(f"❌ 未找到订单 `{order_id}`", ephemeral=True)
+        return
+
+    user_id, plan_id, current_status = order
+
+    if current_status == 'paid':
+        await ctx.respond(f"✅ 订单 `{order_id}` 已经是已支付状态", ephemeral=True)
+        return
+
+    # 将订单标记为已支付
+    c.execute("UPDATE orders SET status = 'paid' WHERE order_id = ?", (order_id,))
+    conn.commit()
+
+    # 获取用户信息
+    member = ctx.guild.get_member(user_id)
+    user_mention = f"<@{user_id}>" if not member else member.mention
+
+    try:
+        # 调用fulfill_order来发放会员权限
+        await fulfill_order(order_id)
+        await ctx.respond(f"✅ 已手动处理订单 `{order_id}`\n用户: {user_mention}\n状态: 已支付 → 已发放会员权限", ephemeral=True)
+    except Exception as e:
+        await ctx.respond(f"⚠️ 订单 `{order_id}` 已标记为已支付，但发放权限时出错: {e}", ephemeral=True)
     """查看订单记录"""
     if status:
         c.execute("SELECT order_id, user_id, plan_id, status, created_at FROM orders WHERE status = ? ORDER BY created_at DESC LIMIT 20", (status,))
