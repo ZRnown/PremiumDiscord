@@ -250,6 +250,7 @@ TOKEN = CONFIG["token"]
 GUILD_ID = CONFIG["guild_id"]
 PAYMENT_PLATFORM = CONFIG.get("payment_platform", "epusdt")
 ENABLE_PRIVILEGED_INTENTS = CONFIG.get("enable_privileged_intents", False)
+DEFAULT_CURRENCY = CONFIG.get("default_currency", "USDT").upper()
 
 # 使用配置重新创建bot
 create_bot()
@@ -607,21 +608,21 @@ class NetworkSelectView(ui.View):
         # 根据套餐货币单位和支付方式决定传递给支付平台的金额
         if currency == 'CNY':
             # 套餐是CNY定价，直接使用价格
-            payment_amount = price
+            payment_amount = round(float(price), 2)
             display_currency = "CNY"
-            display_price = price
+            display_price = payment_amount
         else:  # USDT
             # 套餐是USDT定价，需要根据支付方式转换
             if type_code in ['alipay', 'wxpay', 'qqpay']:
                 # 人民币支付：转换USDT到CNY
-                payment_amount = round(price * USDT_TO_CNY_RATE, 2)
+                payment_amount = round(float(price) * float(USDT_TO_CNY_RATE), 2)
                 display_currency = "CNY"
                 display_price = payment_amount
             else:
                 # USDT支付：直接使用USDT金额
-                payment_amount = price
+                payment_amount = round(float(price), 2)
                 display_currency = "USDT"
-                display_price = price
+                display_price = payment_amount
 
         # 获取支付链接
         pay_url = await YiPay.create_order(trade_no, f"Plan-{plan_name}", payment_amount, type_code)
@@ -756,21 +757,21 @@ class PlanAndNetworkView(ui.View):
         # 根据套餐货币单位和支付方式决定传递给支付平台的金额
         if currency == 'CNY':
             # 套餐是CNY定价，直接使用价格
-            payment_amount = price
+            payment_amount = round(float(price), 2)
             display_currency = "CNY"
-            display_price = price
+            display_price = payment_amount
         else:  # USDT
             # 套餐是USDT定价，需要根据支付方式转换
             if type_code in ['alipay', 'wxpay', 'qqpay']:
                 # 人民币支付：转换USDT到CNY
-                payment_amount = round(price * USDT_TO_CNY_RATE, 2)
+                payment_amount = round(float(price) * float(USDT_TO_CNY_RATE), 2)
                 display_currency = "CNY"
                 display_price = payment_amount
             else:
                 # USDT支付：直接使用USDT金额
-                payment_amount = price
+                payment_amount = round(float(price), 2)
                 display_currency = "USDT"
-                display_price = price
+                display_price = payment_amount
 
         # 获取支付链接
         pay_url = await YiPay.create_order(trade_no, f"Plan-{plan_name}", payment_amount, type_code)
@@ -791,25 +792,22 @@ async def set_plan(
     ctx,
     name: str,
     price: float,
-    currency: str,
     role: discord.Role,
     duration: int
 ):
-    # 验证currency参数
-    if currency.upper() not in ['USDT', 'CNY']:
-        await ctx.respond("❌ 货币单位必须是 'USDT' 或 'CNY'", ephemeral=True)
-        return
+    # 使用配置文件中的默认货币单位
+    currency = DEFAULT_CURRENCY
 
     # 检查是否已存在同名套餐，存在则更新，不存在则插入
     c.execute("SELECT id FROM plans WHERE name = ?", (name,))
     data = c.fetchone()
     if data:
         c.execute("UPDATE plans SET price=?, currency=?, role_id=?, duration_months=? WHERE name=?",
-                  (price, currency.upper(), role.id, duration, name))
+                  (price, currency, role.id, duration, name))
         action = "更新"
     else:
         c.execute("INSERT INTO plans (name, price, currency, role_id, duration_months) VALUES (?, ?, ?, ?, ?)",
-                  (name, price, currency.upper(), role.id, duration))
+                  (name, price, currency, role.id, duration))
         action = "添加"
     conn.commit()
     await ctx.respond(f"✅ 已{action}套餐 **{name}**: {price} {currency.upper()} -> {role.mention}", ephemeral=True)

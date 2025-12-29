@@ -52,9 +52,16 @@ pip install py-cord>=2.4.0 aiohttp>=3.8.0
     "QQ钱包": "qqpay",
     "USDT": "usdt"
   },
-  "enable_privileged_intents": false
+  "enable_privileged_intents": false,
+  "default_currency": "CNY"
 }
 ```
+
+**重要配置说明**:
+- `default_currency`: 设置默认货币单位 (`"CNY"` 或 `"USDT"`)
+- 所有套餐都会使用这个默认货币单位
+- 如果设置为 `"CNY"`，所有价格都按人民币计算
+- 如果设置为 `"USDT"`，会根据支付方式自动转换为相应货币
 
 ## 🎮 使用方法
 
@@ -63,9 +70,11 @@ pip install py-cord>=2.4.0 aiohttp>=3.8.0
 使用 `/set_plan` 命令设置会员套餐：
 
 ```
-/set_plan name:月会员 price:39.0 currency:USDT role:@月会员 duration:1
-/set_plan name:年会员 price:199.0 currency:CNY role:@年会员 duration:12
+/set_plan name:月会员 price:39.0 role:@月会员 duration:1
+/set_plan name:年会员 price:299.0 role:@年会员 duration:12
 ```
+
+**货币单位**: 所有套餐都使用配置文件中的 `default_currency` 设置
 
 ### 发送充值面板
 
@@ -129,6 +138,9 @@ pip install py-cord>=2.4.0
 - ✅ Py-cord兼容性优化
 - ✅ 添加手动处理已支付订单功能
 - ✅ 支持后台补单情况的处理
+- ✅ 添加默认货币单位配置
+- ✅ 简化套餐设置命令
+- ✅ 修复价格计算精度问题
 
 ---
 
