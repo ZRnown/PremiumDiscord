@@ -104,8 +104,15 @@ https://discord.com/api/oauth2/authorize?client_id=YOUR_CLIENT_ID&permissions=26
 
 1. **配置检查**: 机器人已配置为使用聚合支付平台 (https://feedapp.top/)
 2. **启动机器人**: `python main.py`
-3. **发送支付面板**: 使用 `/send_panel` 指令在Discord频道中创建支付界面
+3. **发送支付面板**: 使用 `!发送面板` 指令在Discord频道中创建支付界面
 4. **测试支付**: 用户可以选择支付宝测试支付（0.01元测试订单已验证成功）
+
+### 💡 Discord.py版本兼容性
+
+- **discord.py 2.0+**: 支持slash commands (`/send_panel`)
+- **discord.py 1.x**: 使用传统文本命令 (`!发送面板`)
+
+当前环境使用传统文本命令模式。
 
 ### 📊 API测试结果
 
@@ -114,11 +121,26 @@ https://discord.com/api/oauth2/authorize?client_id=YOUR_CLIENT_ID&permissions=26
 - ✅ 签名验证：MD5算法工作正常
 - ✅ 网络连接：API响应正常
 
-### 管理员指令
+### 📋 可用命令
 
-#### 1. 设置套餐
+#### 用户命令
+- `!发送面板` - 获取充值界面和支付选项
 
-```
+#### 管理员命令
+- `!添加套餐 <名称> <价格> <@角色>` - 添加新的会员套餐
+- `!删除套餐 <名称>` - 删除指定的套餐
+- `!查看套餐` - 查看所有已配置的套餐
+- `!帮助` - 显示完整的帮助信息
+
+### 传统命令使用说明
+
+由于当前环境使用discord.py 1.x版本，所有功能通过传统文本命令实现：
+
+1. **发送充值面板**: `!发送面板`
+2. **添加套餐**: `!添加套餐 月会员 29.9 @月会员`
+3. **管理套餐**: `!查看套餐` 或 `!删除套餐 月会员`
+
+### 管理员指令（兼容模式）
 /set_plan name:月会员 price:66.0 role:@月会员 duration:1
 /set_plan name:年会员 price:399.0 role:@年会员 duration:12
 /set_plan name:合伙人 price:999.0 role:@合伙人 duration:-1
