@@ -121,22 +121,7 @@ except AttributeError:
             self.description = description
             self.default = default
 
-# Option兼容类
-class Option:
-    def __init__(self, type_hint, description="", **kwargs):
-        self.type_hint = type_hint
-        self.description = description
-        self.kwargs = kwargs
-
-    def __call__(self, func):
-        return func
-
-    # 关键：使Option表现为原始类型
-    def __eq__(self, other):
-        return self.type_hint == other
-
-    def __hash__(self):
-        return hash(self.type_hint)
+# 移除不再需要的Option类
 
     def __repr__(self):
         return repr(self.type_hint)
@@ -722,11 +707,11 @@ class PlanAndNetworkView(ui.View):
 @slash_command(guild_ids=[GUILD_ID], description="添加或更新会员套餐")
 @commands.has_permissions(administrator=True)
 async def set_plan(
-    ctx, 
-    name: Option(str, "套餐名称 (如: 月会员)"),
-    price: Option(float, "价格 (USDT)"),
-    role: Option(discord.Role, "对应的身份组"),
-    duration: Option(int, "时长(月)，输入 -1 代表永久")
+    ctx,
+    name: str,
+    price: float,
+    role: discord.Role,
+    duration: int
 ):
     # 检查是否已存在同名套餐，存在则更新，不存在则插入
     c.execute("SELECT id FROM plans WHERE name = ?", (name,))
@@ -795,7 +780,7 @@ async def send_panel(ctx):
 @commands.has_permissions(administrator=True)
 async def delete_plan(
     ctx,
-    name: Option(str, "要删除的套餐名称")
+    name: str
 ):
     c.execute("SELECT id FROM plans WHERE name = ?", (name,))
     data = c.fetchone()
@@ -821,8 +806,8 @@ async def list_plans(ctx):
 @commands.has_permissions(administrator=True)
 async def grant_member(
     ctx,
-    user: Option(discord.Member, "要授予的用户"),
-    plan_name: Option(str, "套餐名称，需与 /set_plan 中的名称一致")
+    user: discord.Member,
+    plan_name: str
 ):
     plan = fetch_plan_by_name(plan_name)
     if not plan:
@@ -862,7 +847,7 @@ async def grant_member(
 @commands.has_permissions(administrator=True)
 async def test_callback(
     ctx,
-    order_id: Option(str, "要测试的订单号（从订单记录中获取）")
+    order_id: str
 ):
     """模拟 Epusdt 回调，测试支付成功流程"""
     # 检查订单是否存在
@@ -935,7 +920,7 @@ async def test_callback(
 @commands.has_permissions(administrator=True)
 async def list_orders(
     ctx,
-    status: Option(str, "订单状态筛选（pending/paid，留空查看全部）", default=None, required=False)
+    status: str = None
 ):
     """查看订单记录"""
     if status:
